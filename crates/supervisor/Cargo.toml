@@ -1,0 +1,17 @@
+[package]
+name = "vox-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+vox-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+vox-broker = { path = "../broker" }
+vox-tool-runtime = { path = "../tool-runtime" }

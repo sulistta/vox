@@ -1,0 +1,22 @@
+{
+  "name": "@vox/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "vox-agent-core": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@vox/protocol": "workspace:*",
+    "@vox/provider-adapters": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3"
+  }
+}

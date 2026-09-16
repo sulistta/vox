@@ -1,0 +1,4 @@
+packages:
+  - packages/protocol
+  - packages/provider-adapters
+  - packages/agent-core

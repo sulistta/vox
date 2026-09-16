@@ -55,5 +55,7 @@ Os demais detalhes (runtime, schema, persistência, metas, política e estrutura
 | A13 | Proposta | Manter acima opt-in; ocultar run conserva Parar | T066/T069, matriz por compositor |
 | A14 | Proposta | Revisar voz por padrão; envio direto configurável | T073 |
 | A15 | Proposta | Rascunho editável durante run; novo envio só após parada/conclusão | T068/T077 |
+| A16 | Pendente | Baseline de hardware, ambientes adicionais e orçamento numérico de validação | T001 registrou a máquina Linux de referência; T008/T047–T056 fixam o restante |
+| A17 | Pendente | Fixture, versões e contas de teste para VS Code/Discord | T001 registrou os apps de referência; T004/T008/T052 fixam os cenários controlados |
 
 Nenhum token, tamanho ou comportamento específico de APIs de janela foi validado em runtime nesta revisão. O uso de Hallmark orienta contenção visual/estados; a stack continua nativa Rust/egui. Riscos adicionais: decoração customizada quebrar movimento/acessibilidade; janela compacta ocultar decisão importante; eventos fora de ordem exibirem resultado incorreto; tamanho pequeno não suportar escala de texto. Mitigações estão em T066/T069/T074/T077, com fallback nativo e critérios verificáveis.

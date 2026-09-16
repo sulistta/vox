@@ -1,0 +1,23 @@
+{
+  "name": "vox-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @vox/protocol build && pnpm --filter @vox/provider-adapters build && pnpm --filter @vox/agent-core build",
+    "test": "pnpm --filter @vox/protocol test && pnpm --filter @vox/provider-adapters test && pnpm --filter @vox/agent-core test",
+    "typecheck": "pnpm build && tsc --noEmit",
+    "t002": "node spikes/t002-runtime/run.mjs",
+    "package:dev": "./scripts/package-dev.sh",
+    "bundle:validate": "./scripts/validate-bundle.sh",
+    "benchmark:core": "node scripts/benchmark-core.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vox.invalid/schemas/ipc.schema.json",
+  "title": "Vox private IPC message",
+  "description": "Versioned NDJSON messages exchanged only between the native supervisor and the private agent core.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": { "type": "string" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "protocol": { "type": "integer", "const": 1 },
+    "content": { "type": "string", "maxLength": 1048576 },
+    "delta": { "type": "string", "maxLength": 65536 },
+    "tool": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$" },
+    "arguments": { "type": "object", "additionalProperties": true },
+    "status": { "enum": ["success", "error", "cancelled", "unknown"] },
+    "error_code": { "type": "string", "maxLength": 128 },
+    "retryable": { "type": "boolean" },
+    "side_effect": { "enum": ["none", "applied", "unknown"] }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "turn.start" } } },
+      "then": { "required": ["request_id", "session_id", "run_id", "content"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "turn.cancel" } } },
+      "then": { "required": ["request_id", "run_id"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool.result" } } },
+      "then": { "required": ["run_id", "call_id", "tool", "status"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "heartbeat" } } },
+      "then": { "required": ["request_id"] }
+    }
+  ]
+}

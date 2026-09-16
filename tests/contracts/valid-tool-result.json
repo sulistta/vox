@@ -1,0 +1,1 @@
+{"type":"tool.result","request_id":"req-contract-tool","session_id":"session-contract-1","run_id":"run-contract-1","call_id":"call-contract-1","tool":"desktop.list_windows","status":"success","side_effect":"none","data":{"windows":[],"count":0},"verification":{"observed":true}}

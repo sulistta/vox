@@ -1,0 +1,22 @@
+# Clones de auditoria local; a proveniência é reproduzida pelos manifestos versionados.
+upstream/pi/
+upstream/xa11y/
+
+# Saídas locais de builds, testes e ferramentas.
+target/
+node_modules/
+dist/
+coverage/
+.artifacts/
+.runtime-data/
+
+# TypeScript compiler output kept beside source files in the dev workspace.
+packages/*/src/*.js
+packages/*/src/*.js.map
+packages/*/src/*.d.ts
+packages/*/src/*.d.ts.map
+
+# Credenciais e configurações locais.
+.env
+.env.*
+!.env.example

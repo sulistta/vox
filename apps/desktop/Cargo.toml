@@ -1,0 +1,19 @@
+[package]
+name = "vox-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+vox-broker = { path = "../../crates/broker" }
+vox-desktop-access = { path = "../../crates/desktop-access" }
+vox-policy = { path = "../../crates/policy" }
+vox-session-store = { path = "../../crates/session-store" }
+vox-secrets = { path = "../../crates/secrets" }
+vox-supervisor = { path = "../../crates/supervisor" }
+vox-tool-runtime = { path = "../../crates/tool-runtime" }
