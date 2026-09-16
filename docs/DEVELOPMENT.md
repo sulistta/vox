@@ -31,6 +31,9 @@ pnpm bundle:validate dist/vox-dev
 pnpm package:linux /tmp/vox-linux-dev.tar.gz
 ```
 
+O workflow de CI repete os gates do bundle no Ubuntu e publica o tarball Linux
+e seu checksum como artefato de desenvolvimento.
+
 O launcher instalado fica em `~/.local/vox/bin/vox` por padrão; o prefixo pode
 ser alterado com `VOX_INSTALL_PREFIX` ou `--prefix`. `linux/uninstall.sh`
 preserva os dados por padrão e só os remove com `--remove-data`.
@@ -50,12 +53,14 @@ VOX_AGENT_ENTRY="$PWD/packages/agent-core/dist/main.js" \
 
 Para usar o keyring no Linux, configure `VOX_PROVIDER_ACCOUNT` ou informe a
 conta em Preferências e grave a chave pelo botão explícito. Endpoint e modelo
-também podem ser editados nas Preferências; a mudança é aplicada no próximo
-core privado. O Vox usa
+também podem ser editados nas Preferências; quando não há run ativo, a mudança
+reinicia somente o core privado e mantém a janela/sessão. O Vox usa
 `secret-tool`/libsecret, não cria arquivo de fallback e injeta a chave somente
 no próximo processo privado do core. Se `secret-tool` não estiver instalado,
 a indisponibilidade deve ser corrigida no ambiente; não coloque a chave no
-SQLite ou em logs.
+SQLite ou em logs. Em macOS e Windows, o build usa os backends nativos de
+Keychain/Credential Manager; a aceitação desses backends depende da execução na
+matriz CI e nas máquinas de referência.
 
 `VOX_XA11Y_BIN` pode apontar para um binário xa11y apenas como fallback operacional. A ferramenta de janelas tenta primeiro o adapter Rust nativo; se a ponte de acessibilidade não estiver disponível, o resultado é uma falha factual e recuperável, não uma fixture apresentada como observação real.
 

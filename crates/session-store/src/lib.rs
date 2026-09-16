@@ -191,14 +191,28 @@ impl SessionStore {
 
     pub fn recover_interrupted(&self) -> Result<usize, StoreError> {
         let changed = self.connection.execute("UPDATE runs SET state='interrupted', finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('running','executing','thinking','receiving','cancelling')", [])?;
-        self.connection.execute(
-            "UPDATE effects SET status='unknown', side_effect='unknown' WHERE status='pending'",
-            [],
-        )?;
+        self.reconcile_pending_effects(None)?;
         self.connection.execute(
             "UPDATE approvals SET state='invalidated' WHERE state='pending'",
             [],
         )?;
+        Ok(changed)
+    }
+
+    /// Mark effects that may have crossed an external boundary as unknown
+    /// before a crashed run is replaced. A caller must never turn these rows
+    /// back into success; the idempotency journal remains the durable fence.
+    pub fn reconcile_pending_effects(&self, run_id: Option<&str>) -> Result<usize, StoreError> {
+        let changed = match run_id {
+            Some(run_id) => self.connection.execute(
+                "UPDATE effects SET status='unknown', side_effect='unknown' WHERE status='pending' AND run_id=?1",
+                params![run_id],
+            )?,
+            None => self.connection.execute(
+                "UPDATE effects SET status='unknown', side_effect='unknown' WHERE status='pending'",
+                [],
+            )?,
+        };
         Ok(changed)
     }
 
@@ -834,6 +848,56 @@ mod tests {
                 .unwrap());
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_effect_reconciliation_can_be_scoped_to_the_crashed_run() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let first_session = store.create_session("first").unwrap();
+        let second_session = store.create_session("second").unwrap();
+        let first_run = store.start_run(&first_session, None).unwrap();
+        let second_run = store.start_run(&second_session, None).unwrap();
+        assert!(store
+            .begin_effect(
+                "effect-first",
+                &first_run.id,
+                "call-first",
+                "files.write",
+                &serde_json::json!({"path":"first"}),
+            )
+            .unwrap());
+        assert!(store
+            .begin_effect(
+                "effect-second",
+                &second_run.id,
+                "call-second",
+                "files.write",
+                &serde_json::json!({"path":"second"}),
+            )
+            .unwrap());
+
+        assert_eq!(
+            store
+                .reconcile_pending_effects(Some(&first_run.id))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.effect("effect-first").unwrap().unwrap().status,
+            "unknown"
+        );
+        assert_eq!(
+            store.effect("effect-second").unwrap().unwrap().status,
+            "pending"
+        );
+        assert!(!store
+            .complete_effect(
+                "effect-first",
+                "success",
+                "applied",
+                &serde_json::json!({"path":"replay"}),
+            )
+            .unwrap());
     }
 
     #[test]

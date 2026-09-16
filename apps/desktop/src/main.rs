@@ -77,6 +77,7 @@ struct VoxApp {
     provider_endpoint_input: String,
     provider_model_input: String,
     provider_keyring_status: Option<String>,
+    configuration_restart_pending: bool,
     desktop_lease_owner: Option<String>,
     last_lease_renewed: Instant,
 }
@@ -193,6 +194,7 @@ impl VoxApp {
             provider_endpoint_input,
             provider_model_input,
             provider_keyring_status: None,
+            configuration_restart_pending: false,
             desktop_lease_owner,
             last_lease_renewed: Instant::now(),
         };
@@ -361,16 +363,24 @@ impl VoxApp {
         self.provider_account = account.clone();
         if self.provider_secret_input.is_empty() {
             self.refresh_core_environment();
-            self.provider_keyring_status =
-                Some("Conta salva; nenhuma nova chave foi gravada.".into());
+            let applied = self.restart_core_for_configuration();
+            self.provider_keyring_status = Some(if applied {
+                "Conta salva; nenhuma nova chave foi gravada. A configuração foi aplicada ao core ocioso.".into()
+            } else {
+                "Conta salva; a configuração será aplicada quando a tarefa atual terminar.".into()
+            });
             return;
         }
         match SecretStore::native("vox").set(&account, &self.provider_secret_input) {
             Ok(()) => {
                 self.provider_secret_input.clear();
                 self.refresh_core_environment();
-                self.provider_keyring_status =
-                    Some("Chave salva no keyring; reabra o core para aplicar a credencial.".into());
+                let applied = self.restart_core_for_configuration();
+                self.provider_keyring_status = Some(if applied {
+                    "Chave salva no keyring; a configuração foi aplicada ao core ocioso.".into()
+                } else {
+                    "Chave salva no keyring; a configuração será aplicada quando a tarefa atual terminar.".into()
+                });
             }
             Err(error) => {
                 self.provider_keyring_status = Some(format!("Não foi possível salvar: {error}"));
@@ -386,8 +396,12 @@ impl VoxApp {
             let _ = store.set_preference("provider_model", &model, 1);
         }
         self.refresh_core_environment();
-        self.provider_keyring_status =
-            Some("Configuração salva; feche e abra o core para aplicar endpoint/modelo.".into());
+        let applied = self.restart_core_for_configuration();
+        self.provider_keyring_status = Some(if applied {
+            "Configuração salva e aplicada ao core ocioso; a janela permaneceu aberta.".into()
+        } else {
+            "Configuração salva; ela será aplicada quando a tarefa atual terminar.".into()
+        });
     }
 
     fn refresh_core_environment(&mut self) {
@@ -525,11 +539,28 @@ impl VoxApp {
 
     fn restart_core_after_failure(&mut self) {
         self.revoke_pending_approval("invalidated");
+        let configuration_was_pending = self.configuration_restart_pending;
+        self.configuration_restart_pending = false;
+        let pending_unknown = self
+            .store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .reconcile_pending_effects(self.active_store_run.as_deref())
+                    .ok()
+            })
+            .unwrap_or(0);
         self.finish_store_run("interrupted");
         let interrupted_run = self.view.active_run.take().is_some();
         if interrupted_run {
             self.view.activity = None;
-            self.view.error = Some("run interrompido pela queda do core".into());
+            self.view.error = Some(if pending_unknown > 0 {
+                format!(
+                    "run interrompido pela queda do core; {pending_unknown} efeito(s) ficaram incertos e não serão repetidos"
+                )
+            } else {
+                "run interrompido pela queda do core".into()
+            });
         }
         if self.restart_attempts >= 3 {
             self.view.connected = false;
@@ -555,6 +586,11 @@ impl VoxApp {
                 } else {
                     "core reiniciado, handshake pendente".into()
                 };
+                if configuration_was_pending && self.view.connected {
+                    self.provider_keyring_status = Some(
+                        "Configuração pendente aplicada durante a recuperação do core.".into(),
+                    );
+                }
                 self.last_heartbeat_sent = Instant::now();
                 self.last_heartbeat_received = Instant::now();
                 self.supervisor = Some(supervisor);
@@ -565,6 +601,62 @@ impl VoxApp {
                     .fail(format!("não foi possível reiniciar o core: {error}"));
             }
         }
+    }
+
+    fn restart_core_for_configuration(&mut self) -> bool {
+        if self.view.active_run.is_some() {
+            self.configuration_restart_pending = true;
+            self.provider_keyring_status = Some(
+                "A configuração foi salva; pare a tarefa atual para aplicá-la com segurança."
+                    .into(),
+            );
+            return false;
+        }
+        self.configuration_restart_pending = false;
+        self.revoke_pending_approval("invalidated");
+        self.supervisor.take();
+        self.view.connected = false;
+        self.view.status = "aplicando configuração…".into();
+        self.last_heartbeat_sent = Instant::now();
+        self.last_heartbeat_received = Instant::now();
+        match AgentSupervisor::spawn_with_env(
+            default_node(),
+            default_entry(),
+            &self.core_environment,
+        ) {
+            Ok(supervisor) => {
+                let initialized = supervisor.initialize().is_ok();
+                let opened = supervisor
+                    .open_session(&Uuid::new_v4().to_string(), &self.session_id)
+                    .is_ok();
+                self.view.connected = initialized && opened;
+                self.view.status = if self.view.connected {
+                    "configuração aplicada; core pronto".into()
+                } else {
+                    "core reiniciado, handshake pendente".into()
+                };
+                self.supervisor = Some(supervisor);
+                self.view.connected
+            }
+            Err(error) => {
+                self.view
+                    .fail(format!("não foi possível aplicar configuração: {error}"));
+                false
+            }
+        }
+    }
+
+    fn apply_pending_configuration_if_idle(&mut self) {
+        if !self.configuration_restart_pending || self.view.active_run.is_some() {
+            return;
+        }
+        self.configuration_restart_pending = false;
+        let applied = self.restart_core_for_configuration();
+        self.provider_keyring_status = Some(if applied {
+            "Configuração pendente aplicada ao core ocioso; a janela permaneceu aberta.".into()
+        } else {
+            "A configuração pendente não pôde ser aplicada; tente salvar novamente.".into()
+        });
     }
 
     fn approve_pending(&mut self) {
@@ -1069,6 +1161,7 @@ impl eframe::App for VoxApp {
                 }
             }
         }
+        self.apply_pending_configuration_if_idle();
         ui.ctx().set_visuals(if self.dark_theme {
             egui::Visuals::dark()
         } else {
@@ -1439,9 +1532,7 @@ impl eframe::App for VoxApp {
                     if let Some(status) = self.provider_keyring_status.as_deref() {
                         ui.small(status);
                     }
-                    ui.small(
-                        "A chave salva será lida quando o core privado for iniciado novamente.",
-                    );
+                    ui.small("A configuração é aplicada ao reiniciar o core privado ocioso; durante uma tarefa ela aguarda o término.");
                     ui.separator();
                     ui.label("Acessibilidade: depende da permissão do sistema.");
                     ui.label("Voz: push-to-talk ainda não configurado nesta versão.");

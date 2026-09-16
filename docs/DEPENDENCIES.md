@@ -9,7 +9,7 @@ Este inventário cobre as dependências diretas que entram na primeira fatia exe
 | Pi auditado | `60e7e76bd7ea25cad1dd6f3f1ce0d18814a42759` | referência e candidatos de core | MIT; upstream documentado em T003 | nenhum CLI/TUI/extensão/config do usuário é incorporado |
 | rusqlite | 0.37.0 | histórico local | MIT | SQLite local; sem envio automático |
 | Node.js | >=22.19.0 | core privado durante desenvolvimento | licença própria/Node.js | empacotamento final ainda pendente |
-| Keyring | libsecret `secret-tool` no Linux; Security.framework/Windows Credential Manager ainda em integração | credencial do provider fora do SQLite | APIs do SO | sem fallback em arquivo; macOS/Windows continuam bloqueados |
+| Keyring | libsecret `secret-tool` no Linux; Security.framework/Keychain no macOS; Windows Credential Manager no Windows | credencial do provider fora do SQLite | APIs nativas do SO | sem fallback em arquivo; aceitação operacional por SO ainda pendente |
 | TypeScript | 5.9.3 | compilação do core/protocolo | Apache-2.0 | tipos não substituem validação Rust |
 
 O produto ainda não está publicado como instalador, portanto este documento não declara assinatura, SBOM final ou compatibilidade de distribuição. T055/T056 precisam gerar esses artefatos antes de qualquer release.

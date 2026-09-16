@@ -193,7 +193,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T009,T010.
 - **Trabalho e entrega:** Criar pipes privados, handshake, correlação, heartbeat, limites, shutdown e recuperação.
 - **Aceite:** Core morto/ruidoso não trava UI; chamadas pendentes terminam; stdout inválido é diagnosticado.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T011 — IPC e supervisor](T011-supervisor-ipc.md). Handshake/correlação/fechamento/heartbeat/EOF/stdout inválido/watchdog de pendências e até três reinícios passam; reconciliação de efeitos desconhecidos após crash ainda está aberta.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T011 — IPC e supervisor](T011-supervisor-ipc.md). Handshake/correlação/fechamento/heartbeat/EOF/stdout inválido/watchdog de pendências e até três reinícios passam; a UI agora reconcilia `pending`→`unknown` do run antes de reiniciar, mas a fault injection do pacote ainda está aberta.
 
 ### T012 — Criar fork seletivo
 
@@ -229,7 +229,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T009,T012.
 - **Trabalho e entrega:** Configurar fmt/lint/test/build por SO, caches, inventário de licenças e revisão de upgrades.
 - **Aceite:** Pipeline reproduzível a partir dos lockfiles; relatório de proveniência acompanha fork.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; evidência: `.github/workflows/ci.yml`, [DEPENDENCIES](../docs/DEPENDENCIES.md), `rust-toolchain.toml` e lockfiles; execução remota da matriz ainda pendente.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: `.github/workflows/ci.yml`, [DEPENDENCIES](../docs/DEPENDENCIES.md), `rust-toolchain.toml` e lockfiles; CI agora também gera/valida e publica o bundle Linux como artefato, mas a execução remota da matriz ainda precisa passar.
 
 ### T016 — Eliminar bypass de ferramentas herdadas
 
@@ -292,7 +292,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T017,T021.
 - **Trabalho e entrega:** Integrar keyring, redaction, exclusão/exportação e aviso de envio remoto.
 - **Aceite:** Segredo não aparece em logs/DB/exportação; keyring indisponível não gera arquivo plaintext implícito.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, adaptador `vox-secrets` com libsecret/fixture e formulário básico de conta + campo mascarado passam; o segredo só é injetado no ambiente do core privado e nunca no SQLite. Security.framework/Windows Credential Manager, validação remota e aplicação sem reabrir o core continuam pendentes.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, adaptador `vox-secrets` com libsecret/Keychain/Windows Credential Manager/fixture e formulário básico de conta + campo mascarado passam no código Linux/fixture; o segredo só é injetado no ambiente do core privado e nunca no SQLite. Validação real nos dois outros SOs e validação remota continuam pendentes.
 
 ### T023 — Implementar parada ponta a ponta
 
@@ -301,7 +301,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T011,T020.
 - **Trabalho e entrega:** Priorizar cancelamento na UI, core, provider e workers; revogar aprovações e impedir novos efeitos.
 - **Aceite:** Parar funciona mesmo com provider/worker lento; reporta ação aplicada/incerta sem promessa de rollback.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; abort do core, espera de tool, revogação de approval, botão Parar, watchdog de requests e encerramento de grupo privado de subprocessos têm cobertura local; provider/worker empacotado lento, pós-condição externa e medição de latência ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; abort do core, espera de tool, revogação de approval, botão Parar, watchdog de requests, reconciliação de efeitos pendentes e encerramento de grupo privado de subprocessos têm cobertura local; provider/worker empacotado lento, pós-condição externa e medição de latência ainda faltam.
 
 ### T024 — Criar adapter Rust de acessibilidade
 
@@ -355,7 +355,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T020,T028.
 - **Trabalho e entrega:** Tratar stale refs, timeout, reobservação, estagnação e retry somente quando seguro.
 - **Aceite:** Três ciclos sem progresso encerram/pedem ajuda; efeitos incertos não são repetidos cegamente.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; stale/timeout/cancel, erro estruturado, contador de estagnação de três ciclos e journal que bloqueia replay de efeitos `pending/unknown` existem no core/UI/store; reconciliação externa e retry seguro ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; stale/timeout/cancel, erro estruturado, contador de estagnação de três ciclos, reconciliação em crash do core e journal que bloqueia replay de efeitos `pending/unknown` existem no core/UI/store; reconciliação externa e retry seguro ainda faltam.
 
 ### T030 — Implementar shell controlado
 
@@ -445,7 +445,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T022,T037.
 - **Trabalho e entrega:** Configurar provider/modelo, permissões, atalhos, histórico e diagnósticos simples.
 - **Aceite:** Usuário novo chega à primeira tarefa; credencial/permissão inválida tem recuperação clara.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; preferências/diagnóstico básico, provider configurável e adaptador de keyring Linux/fixture existem; formulário de credencial, permissões multiplataforma e onboarding completo ainda não.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; preferências/diagnóstico básico, provider configurável, adaptador de keyring Linux/Keychain/Windows/fixture e formulário básico de credencial existem; configuração endpoint/modelo/conta reinicia apenas o core privado quando ocioso, preserva a janela e fica pendente durante run; permissões multiplataforma e onboarding completo ainda não.
 
 ### T040 — Polir janela residente e acessibilidade
 
@@ -580,7 +580,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T021,T023,T030,T044.
 - **Trabalho e entrega:** Injetar crash, stream quebrado, worker preso, suspensão, perda de foco e cancelamento em todos estados.
 - **Aceite:** J08 e recuperação passam; nenhum novo efeito após cancelamento e nenhum replay automático após crash.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; cancelamento do core, EOF do supervisor, grupo privado de processos, recovery SQLite, journal `pending`→`unknown`, corrupção diagnosticável, timeout, saída limitada e A10 de não-replay passam; crash/worker preso no pacote e J08 real seguem em [QA](../docs/QA.md).
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; cancelamento do core, EOF/stdout inválido do supervisor, grupo privado de processos, recovery SQLite, reconciliação `pending`→`unknown` durante e após crash, corrupção diagnosticável, timeout, saída limitada e A10 de não-replay passam; crash/worker preso no pacote e J08 real seguem em [QA](../docs/QA.md).
 
 ### T055 — Criar artefatos e instaladores
 
@@ -589,7 +589,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T015,T047,T048,T049.
 - **Trabalho e entrega:** Empacotar runtime/core/UI/deps; definir formatos, assinatura, SBOM e hashes por plataforma.
 - **Aceite:** Instalação limpa não precisa de Node/Pi; permissões do pacote final funcionam.
-- **Execução:** status: parcial forte; há [bundle de desenvolvimento](../docs/RELEASE.md), com Node embutido, dependências copiadas, manifesto SHA-256, SBOM dev CycloneDX 1.5, launcher/instalador Linux e smoke reproduzível de instalação/troca/rollback/desinstalação, ainda sem instalador final multiplataforma, assinatura, notices/SBOM de release ou atualização entre versões reais.
+- **Execução:** status: parcial forte; há [bundle de desenvolvimento](../docs/RELEASE.md), com Node embutido, dependências copiadas, manifesto SHA-256, SBOM dev CycloneDX 1.5, launcher/instalador Linux e smoke reproduzível de instalação/troca/rollback/desinstalação; CI Linux também gera e publica o tarball + checksum. Ainda faltam instalador final multiplataforma, assinatura, notices/SBOM de release ou atualização entre versões reais.
 
 ### T056 — Validar instalação e atualização
 
@@ -598,7 +598,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T021,T055.
 - **Trabalho e entrega:** Testar instalar, atualizar, migrar, rollback compatível e desinstalar com preservação/remoção de dados.
 - **Aceite:** Matriz limpa aprovada em cada SO; artefato corrompido não é aceito.
-- **Execução:** status: parcial forte no Linux; `scripts/validate-bundle.sh` valida manifesto/SBOM, exercita o launcher instalado, preservação durante upgrade, rollback de release e escolha explícita de remoção de dados; `pnpm package:linux` gera tarball + SHA-256. Matriz limpa por SO, migração entre versões reais e instalador final continuam externos.
+- **Execução:** status: parcial forte no Linux; `scripts/validate-bundle.sh` valida manifesto/SBOM, rejeita uma cópia adulterada, exercita o launcher instalado, preservação durante upgrade, rollback de release e escolha explícita de remoção de dados; `pnpm package:linux` gera tarball + SHA-256, e o job Linux do CI repete esses gates. Matriz limpa por SO, migração entre versões reais e instalador final continuam externos.
 
 ### T057 — Executar beta de uso diário
 
@@ -773,7 +773,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Mostrar capacidades ausentes e caminho de recuperação.
   - [ ] Bloquear troca de provider durante run; aplicar tema/escala sem reiniciar.
 - **Aceite:** UI10 passa e usuário chega à primeira tarefa sem conhecer Pi/xa11y; negar voz não bloqueia texto.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; tema e "manter acima" são preferências não secretas persistidas, a UI informa provider/capabilities/recuperação e oferece conta + campo mascarado para gravar explicitamente no keyring; endpoint/modelo também podem ser salvos sem segredo e são injetados apenas no próximo core. Reinício imediato, permissões multiplataforma e onboarding completo ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; tema e "manter acima" são preferências não secretas persistidas, a UI informa provider/capabilities/recuperação e oferece conta + campo mascarado para gravar explicitamente no keyring; endpoint/modelo também podem ser salvos sem segredo e agora reiniciam o core privado somente quando ocioso, mantendo a sessão e bloqueando a troca durante run. Permissões multiplataforma e onboarding completo ainda faltam.
 
 ### T072 — Implementar atividade, aprovação e falha parcial
 
@@ -913,7 +913,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Verificar microfone desligado, Parar prioritário e fechamento ordenado.
   - [ ] Confirmar histórico visível e incerteza após reconexão.
 - **Aceite:** UI15 passa; nenhum crash vira completed e nenhum processo próprio órfão fica ativo sem diagnóstico.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; cancelamento core, EOF inesperado, correlação, recovery, journal `pending`→`unknown`, E2E broker/core, A10 de não-replay, grupo de processos, reducer e rejeição de eventos stale por `run_id` têm testes; fault injection do worker/UI empacotado e crash-loop real aguardam T055/T082.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; cancelamento core, EOF/stdout inválido, correlação, recovery, reconciliação em memória e no reopen, E2E broker/core, A10 de não-replay, grupo de processos, reducer e rejeição de eventos stale por `run_id` têm testes; fault injection do worker/UI empacotado e crash-loop real aguardam T055/T082.
 
 ### T082 — Validar experiência no pacote instalado
 

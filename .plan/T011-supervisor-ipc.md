@@ -9,6 +9,7 @@ Evidências:
 - `crates/supervisor/tests/supervisor.rs` valida handshake, sessão, streaming, terminal, EOF inesperado e stdout inválido;
 - o teste de tool envia um `call_id` errado, confirma o erro de correlação e depois completa a chamada correta;
 - o teste de saída inesperada usa um core que encerra sem protocolo e confirma diagnóstico sem bloquear o caller;
+- `apps/desktop` reconcilia efeitos `pending` do run ativo como `unknown` antes de reiniciar o core, para que uma queda em processo vivo não dependa de reabrir o SQLite;
 - `cargo clippy --workspace --all-targets -- -D warnings` e `cargo test --workspace` passaram.
 
 O heartbeat agora é um contrato versionado e a janela marca o core como sem

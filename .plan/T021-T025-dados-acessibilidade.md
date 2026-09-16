@@ -2,7 +2,7 @@
 
 Data: 16/09/2026.
 
-`vox-session-store` usa SQLite local com migração v1→v2, mensagens, runs,
+`vox-session-store` usa SQLite local com migração v1→v3, mensagens, runs,
 preferences, journal de efeitos idempotente, recuperação de runs abertos,
 listagem com busca/paginação/estado, exportação e exclusão protegida durante run ativo. A janela usa um
 arquivo persistente no diretório de dados da plataforma (ou `VOX_DATA_DIR` no
@@ -18,9 +18,14 @@ secretas.
 
 Probe real local: `cargo run -p vox-desktop-access --example native_probe` enumerou GNOME Shell, Chromium, Google Chrome, OpenCode, Codex e terminal na sessão Wayland. Nenhum dado da fixture foi usado para essa observação.
 
-O adaptador `vox-secrets` usa libsecret/`secret-tool` no Linux, não grava em
-arquivo e injeta a chave apenas no ambiente do processo privado do core quando
+O adaptador `vox-secrets` usa libsecret/`secret-tool` no Linux, Security.framework
+no macOS e Windows Credential Manager no Windows, sem fallback em arquivo, e
+injeta a chave apenas no ambiente do processo privado do core quando
 `VOX_PROVIDER_ACCOUNT` está configurado. Fixture cobre round-trip, ausência,
-limite e conta inválida. Security.framework no macOS, Credential Manager no
-Windows e formulário visual de credencial ainda estão pendentes; não se deve
-tratar variável de ambiente como armazenamento persistente.
+limite e conta inválida. A aceitação operacional de macOS/Windows e a validação
+visual completa do formulário de credencial ainda estão pendentes; não se deve tratar variável de
+ambiente como armazenamento persistente.
+
+A compilação condicional do crate passou em `x86_64-pc-windows-gnu` e
+`x86_64-apple-darwin` com `cargo check`; isso verifica a fronteira de FFI, não
+substitui o teste com Credential Manager/Keychain em uma sessão real.

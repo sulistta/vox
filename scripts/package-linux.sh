@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /home/fxzin/.cargo/env 2>/dev/null || true
+source "${HOME}/.cargo/env" 2>/dev/null || true
 
 bundle="${VOX_LINUX_BUNDLE:-dist/vox-linux-dev}"
 archive="${1:-dist/vox-linux-dev.tar.gz}"

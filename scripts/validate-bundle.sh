@@ -18,6 +18,14 @@ test -s "$bundle/sbom.cdx.json"
 node -e 'const fs = require("node:fs"); const bom = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (bom.bomFormat !== "CycloneDX" || bom.specVersion !== "1.5" || !Array.isArray(bom.components) || !Array.isArray(bom.dependencies)) process.exit(1);' "$bundle/sbom.cdx.json"
 root="$(mktemp -d /tmp/vox-install-smoke.XXXXXX)"
 trap 'rm -rf -- "$root"' EXIT
+tampered="$root/tampered"
+cp -a -- "$bundle" "$tampered"
+printf '\ncorrupted smoke fixture\n' >>"$tampered/README.txt"
+if node scripts/verify-bundle-manifest.mjs "$tampered" >"$root/tampered.log" 2>&1; then
+  cat "$root/tampered.log" >&2
+  echo "tampered bundle was accepted" >&2
+  exit 4
+fi
 mkdir -p -- "$root/releases"
 cp -a -- "$bundle" "$root/releases/v1"
 ln -s -- "$root/releases/v1" "$root/current"

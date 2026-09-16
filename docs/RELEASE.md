@@ -49,7 +49,8 @@ pnpm package:linux /tmp/vox-linux-dev.tar.gz
 Esse smoke valida o manifesto e o SBOM, instala duas cópias temporárias pelo
 launcher do bundle, preserva o SQLite durante uma troca v1→v2 e rollback v2→v1,
 testa que a desinstalação mantém os dados até a
-remoção explicitamente solicitada e depois apaga apenas o diretório temporário.
+remoção explicitamente solicitada, rejeita uma cópia adulterada antes da
+instalação e depois apaga apenas o diretório temporário.
 Ele não substitui o instalador assinado nem a validação Windows/macOS.
 
 ## Estado atual
