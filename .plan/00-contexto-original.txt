@@ -1,0 +1,240 @@
+Quero desenvolver um assistente virtual de desktop universal, capaz de conversar com o usuário e operar o computador em seu nome.
+
+O projeto deve ser tratado como um produto novo e independente. A ideia não é criar apenas uma extensão, wrapper ou interface gráfica para outro agente existente. Vamos utilizar projetos existentes como fundação para evitar reconstruir componentes já consolidados, mas a identidade, interface, experiência e propósito do aplicativo serão próprios.
+
+Visão do produto
+
+O aplicativo será um assistente de IA residente no computador do usuário.
+
+O usuário deverá poder abrir uma pequena janela flutuante, conversar com o assistente por texto ou voz e pedir ações naturalmente, por exemplo:
+
+“Abra o VS Code e crie um projeto novo.”
+“Encontre aquele arquivo que baixei ontem.”
+“Rode os testes desse projeto.”
+“Abra o Discord.”
+“Crie uma pasta para esse projeto e organize esses arquivos.”
+“Veja o que está aberto no meu computador.”
+“Abra as configurações e altere determinada opção.”
+
+O objetivo é que o agente não seja limitado a um aplicativo específico. Ele deve ser capaz de operar o desktop como um todo.
+
+A longo prazo, a experiência desejada é semelhante a ter uma pessoa operando o computador junto com o usuário, porém utilizando ferramentas do próprio sistema sempre que isso for mais eficiente.
+
+Independência do modelo
+
+Um requisito central do projeto é não depender de um LLM específico.
+
+O usuário deverá poder utilizar diferentes providers e diferentes modelos de linguagem.
+
+Principalmente, o projeto não pode exigir um modelo multimodal.
+
+Modelos puramente textuais devem conseguir utilizar completamente o agente.
+
+Por isso, a aplicação será responsável por transformar o estado do computador em informações estruturadas que um LLM textual consiga compreender.
+
+O modelo deve receber informações semânticas sobre o que existe na interface, em vez de precisar enxergar screenshots diretamente.
+
+Isso permite utilizar tanto modelos comerciais quanto modelos locais ou futuros providers.
+
+Computer Use
+
+Uma das capacidades centrais do produto será Computer Use.
+
+Em vez de depender principalmente de visão computacional e cliques em coordenadas da tela, queremos utilizar as informações de acessibilidade fornecidas pelo próprio sistema operacional e pelos aplicativos.
+
+Isso permite ao agente entender elementos como:
+
+janelas;
+botões;
+campos de texto;
+menus;
+abas;
+listas;
+caixas de diálogo;
+elementos selecionados;
+textos presentes na interface;
+estado dos controles.
+
+Quando possível, o agente também deverá interagir semanticamente com esses elementos, em vez de simplesmente movimentar o mouse até uma coordenada.
+
+Essa abordagem será a principal fonte de percepção do desktop.
+
+No futuro, poderemos acrescentar mecanismos complementares, como visão computacional ou OCR, para interfaces que não oferecem informações suficientes através da acessibilidade.
+
+Porém, acessibilidade será a abordagem principal do produto.
+
+Capacidades além da interface gráfica
+
+O agente não deve ser obrigado a executar tudo através de cliques.
+
+Dependendo da tarefa, ele poderá utilizar diferentes capacidades do computador.
+
+Entre elas:
+
+interação com interfaces gráficas;
+execução de comandos no shell;
+leitura e escrita de arquivos;
+manipulação do sistema de arquivos;
+abertura de aplicativos;
+gerenciamento de processos;
+clipboard;
+navegação entre janelas;
+ferramentas adicionais que forem incorporadas posteriormente.
+
+O agente deverá escolher a ferramenta mais apropriada para cada situação.
+
+Por exemplo, se o usuário pedir para criar um projeto de programação, pode fazer mais sentido criar os arquivos diretamente e executar comandos no terminal do que clicar manualmente em dezenas de elementos da interface.
+
+Já se for necessário alterar uma configuração de um aplicativo, poderá ser mais apropriado controlar a interface gráfica.
+
+Conversação e voz
+
+A interação com o assistente será uma parte muito importante do produto.
+
+Queremos uma experiência muito mais próxima de um assistente pessoal do que de uma ferramenta de terminal.
+
+O usuário poderá conversar normalmente com o agente através da janela flutuante.
+
+Também haverá suporte a voz.
+
+A ideia é permitir uma experiência como:
+
+pressionar uma tecla → falar → soltar → a fala é transcrita → o agente interpreta → executa a tarefa → responde.
+
+A transcrição acontece antes de o conteúdo chegar ao LLM, portanto o modelo utilizado continua podendo ser completamente textual.
+
+A interface deverá mostrar de maneira clara:
+
+a conversa;
+o que o agente está fazendo;
+quando ele está pensando;
+quando está executando uma ação;
+quando está esperando uma resposta;
+erros relevantes;
+possibilidade de interromper a execução imediatamente.
+
+Não queremos uma interface complexa ou cheia de painéis administrativos. A experiência principal deve continuar sendo conversar com o computador.
+
+Base no Pi
+
+Quero utilizar o projeto Pi / pi.dev como uma das bases do desenvolvimento.
+
+Entretanto, não quero transformar o Pi em uma aplicação gráfica nem distribuir o Pi como subprocesso.
+
+A intenção é fazer um fork e reaproveitar somente as partes maduras e úteis da base existente, como conceitos e componentes relacionados a:
+
+integração com diferentes providers de LLM;
+gerenciamento da conversa;
+execução de ferramentas;
+shell;
+manipulação de arquivos;
+loop de agente;
+streaming;
+sessões;
+cancelamento e controle da execução.
+
+Tudo que for específico do produto atual do Pi e não fizer sentido para nosso projeto poderá ser removido ou substituído.
+
+Principalmente, a experiência baseada em CLI não será o produto final.
+
+O resultado deve parecer um aplicativo completamente diferente.
+
+Stack principal
+
+A stack inicial planejada é:
+
+Rust
+
+Será utilizado principalmente para os componentes nativos do desktop e para a interface gráfica.
+
+egui / eframe
+
+Para construir a interface gráfica nativa, incluindo a janela flutuante do assistente.
+
+Não queremos inicialmente utilizar Tauri, Electron ou WebView.
+
+TypeScript
+
+Será utilizado nas partes do Agent Core derivadas do Pi e em componentes da base que fizer sentido preservar.
+
+Pi / pi.dev
+
+Será usado como base conceitual e de código para componentes já consolidados do sistema de agentes e integração com LLMs.
+
+xa11y
+
+Será utilizado como a principal camada de acesso às informações de acessibilidade das interfaces gráficas.
+
+A intenção é utilizá-lo como dependência, sem modificar seu código inicialmente.
+
+Ele deverá permitir que nosso sistema trabalhe com as APIs de acessibilidade disponíveis nos diferentes sistemas operacionais.
+
+APIs nativas do sistema operacional
+
+O projeto deverá poder aproveitar recursos nativos de Windows, Linux e macOS quando necessário.
+
+Sistemas operacionais
+
+O objetivo do projeto é ser multiplataforma.
+
+Os sistemas principais são:
+
+Linux;
+Windows;
+macOS.
+
+Linux, incluindo ambientes utilizando Wayland, é importante para o projeto e não deve ser tratado como plataforma secundária.
+
+A arquitetura deve considerar desde o início que algumas capacidades poderão ter comportamentos diferentes dependendo do sistema operacional.
+
+Filosofia do projeto
+
+Existem alguns princípios importantes que devem orientar todas as decisões:
+
+1. O produto é o assistente, não a tecnologia utilizada por baixo.
+
+O usuário não precisa saber o que é Pi, xa11y, accessibility tree ou qualquer outro componente interno.
+
+2. O LLM deve ser substituível.
+
+O sistema não pode ser arquitetado ao redor de um único modelo ou provider.
+
+3. Modelos textuais são cidadãos de primeira classe.
+
+Multimodalidade pode ser adicionada posteriormente, mas não pode ser obrigatória.
+
+4. Computer Use é uma capacidade central, não um plugin secundário.
+
+Operar aplicativos e entender o desktop faz parte da identidade do produto.
+
+5. O agente deve utilizar a melhor ferramenta disponível.
+
+Nem tudo deve ser resolvido clicando na interface.
+
+6. A experiência deve ser extremamente natural.
+
+O ideal é que o usuário simplesmente diga o que quer que seja feito.
+
+7. O aplicativo deve ser realmente utilizável no dia a dia.
+
+Não estamos construindo uma demonstração de Computer Use ou um experimento acadêmico. A intenção é chegar a um assistente confiável que possa permanecer aberto no computador e executar tarefas reais.
+
+Resultado desejado
+
+No final, quero chegar a uma aplicação em que o usuário possa abrir uma pequena janela flutuante e falar algo como:
+
+“Abra o VS Code, crie um projeto Rust para mim, inicialize o Git, rode o projeto e depois abra a pasta dele.”
+
+O agente deve entender a intenção, utilizar shell, sistema de arquivos e interface gráfica conforme necessário e executar a tarefa.
+
+Ou:
+
+“Abra o Discord e vá até o servidor X.”
+
+Nesse caso, ele poderá interpretar a interface através da camada de acessibilidade e navegar pelo aplicativo.
+
+Tudo isso deve funcionar mesmo utilizando um LLM exclusivamente textual.
+
+A aplicação deve dar a sensação de que o LLM ganhou acesso real ao computador através de uma camada de ferramentas criada por nós.
+
+A partir desta descrição, trate este como o contexto oficial do projeto. Não assuma que estamos construindo apenas um CLI, uma extensão do Pi ou uma simples demonstração de automação. Estamos construindo um assistente de desktop universal, conversacional, multimodelo, multiplataforma e capaz de operar o computador do usuário.
