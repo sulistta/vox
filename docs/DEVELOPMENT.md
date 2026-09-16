@@ -22,8 +22,18 @@ pnpm package:dev
 ```
 
 O bundle é autocontido para o runtime de desenvolvimento, mas ainda não é um
-instalador: não inclui assinatura, atualização, rollback, SBOM ou a matriz
-multiplataforma de T055/T056/T082.
+release assinado: não fecha atualização entre versões reais, notices, ou a
+matriz multiplataforma de T055/T056/T082. O recorte Linux inclui um launcher
+instalável e um SBOM dev verificável.
+
+```sh
+pnpm bundle:validate dist/vox-dev
+pnpm package:linux /tmp/vox-linux-dev.tar.gz
+```
+
+O launcher instalado fica em `~/.local/vox/bin/vox` por padrão; o prefixo pode
+ser alterado com `VOX_INSTALL_PREFIX` ou `--prefix`. `linux/uninstall.sh`
+preserva os dados por padrão e só os remove com `--remove-data`.
 
 Na máquina de referência Linux sem toolchain de sistema, a validação local usou Rust 1.98.1 e um toolchain GCC/binutils extraído em `/tmp/vox-toolchain/root`; a CI usa toolchains nativos de cada runner. Não copie chaves ou tokens para os logs.
 

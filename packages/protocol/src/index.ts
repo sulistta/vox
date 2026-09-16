@@ -35,6 +35,15 @@ export interface SessionOpenRequest {
   session_id: string;
 }
 
+export type ContextRole = "system" | "user" | "assistant" | "tool";
+export type ContextEffect = "none" | "pending" | "applied" | "unknown";
+
+export interface ContextMessage {
+  role: ContextRole;
+  content: string;
+  effect?: ContextEffect;
+}
+
 export interface TurnStartRequest {
   type: "turn.start";
   request_id: string;
@@ -43,6 +52,7 @@ export interface TurnStartRequest {
   content: string;
   source?: "text" | "voice";
   model_ref?: string;
+  context?: ContextMessage[];
 }
 
 export interface TurnCancelRequest {
@@ -282,6 +292,14 @@ export function parseMessage(line: string): IpcMessage {
     if (typeof value.content !== "string" || value.content.length > 1_048_576) throw new ProtocolError("INVALID_FIELD", "content is invalid");
     if (value.source !== undefined && value.source !== "text" && value.source !== "voice") throw new ProtocolError("INVALID_FIELD", "source is invalid");
     if (value.model_ref !== undefined) requiredString(value, "model_ref");
+    if (value.context !== undefined) {
+      if (!Array.isArray(value.context) || value.context.length > 100) throw new ProtocolError("INVALID_FIELD", "context is invalid");
+      for (const message of value.context) {
+        if (!isObject(message) || !["system", "user", "assistant", "tool"].includes(String(message.role))) throw new ProtocolError("INVALID_FIELD", "context role is invalid");
+        if (typeof message.content !== "string" || message.content.length > 64 * 1024) throw new ProtocolError("INVALID_FIELD", "context content is invalid");
+        if (message.effect !== undefined && !["none", "pending", "applied", "unknown"].includes(String(message.effect))) throw new ProtocolError("INVALID_FIELD", "context effect is invalid");
+      }
+    }
   }
   if (kind === "turn.cancel") {
     requiredString(value, "request_id");

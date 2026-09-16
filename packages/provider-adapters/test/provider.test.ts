@@ -1,7 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { OpenAICompatibleTextProvider, FakeTextProvider, ProviderError, parseJsonToolCall, plannedTool, providerFromEnvironment } from "../src/index.js";
+import { OpenAICompatibleTextProvider, FakeTextProvider, ProviderError, parseJsonToolCall, plannedTool, probeOpenAICompatible, providerFromEnvironment } from "../src/index.js";
+
+async function startServer(handler: (request: import("node:http").IncomingMessage) => { status: number; body: string }): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((request, response) => {
+    const result = handler(request);
+    response.writeHead(result.status, { "content-type": "application/json" });
+    response.end(result.body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
+}
 
 test("fake provider is textual, streams and can be cancelled", async () => {
   const provider = new FakeTextProvider();
@@ -10,6 +25,7 @@ test("fake provider is textual, streams and can be cancelled", async () => {
   for await (const chunk of provider.stream("oi", controller.signal)) chunks.push(chunk);
   assert.equal(chunks.join(""), "Recebi: oi");
   assert.equal(provider.capabilities.multimodal, false);
+  assert.equal(provider.capabilities.context_chars, 16 * 1024);
 });
 
 test("environment selects fake provider without exposing credentials", () => {
@@ -19,6 +35,19 @@ test("environment selects fake provider without exposing credentials", () => {
 
 test("openai-compatible provider requires explicit endpoint and model", () => {
   assert.throws(() => providerFromEnvironment({ VOX_PROVIDER: "openai-compatible" }), (error) => error instanceof ProviderError && error.code === "CONFIG_ERROR");
+});
+
+test("provider probe reports bounded model ids without exposing response bodies", async () => {
+  const server = await startServer((request) => {
+    if (request.url === "/models") return { status: 200, body: JSON.stringify({ data: [{ id: "local-a" }, { id: "local-b" }, { nope: true }] }) };
+    return { status: 404, body: "missing" };
+  });
+  try {
+    const result = await probeOpenAICompatible({ baseUrl: server.url, model: "local-a" });
+    assert.deepEqual(result, { available: true, model_ids: ["local-a", "local-b"] });
+  } finally {
+    await server.close();
+  }
 });
 
 test("openai-compatible provider rejects insecure remote endpoints", () => {

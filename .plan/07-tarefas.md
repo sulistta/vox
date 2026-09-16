@@ -193,7 +193,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T009,T010.
 - **Trabalho e entrega:** Criar pipes privados, handshake, correlação, heartbeat, limites, shutdown e recuperação.
 - **Aceite:** Core morto/ruidoso não trava UI; chamadas pendentes terminam; stdout inválido é diagnosticado.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T011 — IPC e supervisor](T011-supervisor-ipc.md). Handshake/correlação/fechamento/heartbeat/EOF/watchdog de pendências e até três reinícios passam; reconciliação de efeitos desconhecidos após crash ainda está aberta.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T011 — IPC e supervisor](T011-supervisor-ipc.md). Handshake/correlação/fechamento/heartbeat/EOF/stdout inválido/watchdog de pendências e até três reinícios passam; reconciliação de efeitos desconhecidos após crash ainda está aberta.
 
 ### T012 — Criar fork seletivo
 
@@ -256,7 +256,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T017.
 - **Trabalho e entrega:** Adicionar endpoint configurável, capability probing e modelo local de referência.
 - **Aceite:** Mesma jornada roda local sem provider comercial; endpoint indisponível não causa loop.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; endpoint customizado é configurável e testado contra servidor local; engine local dedicada e probe de capabilities permanecem abertos.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; endpoint customizado é configurável, `probeOpenAICompatible` consulta `/models` com timeout/redaction e o adapter local é testado contra servidor HTTP; engine local dedicada e capability semantics além da lista de modelos permanecem abertos.
 
 ### T019 — Suportar diferenças entre modelos
 
@@ -265,7 +265,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T017,T018.
 - **Trabalho e entrega:** Normalizar tools/contexto, fallback JSON validado, troca segura de provider e compactação.
 - **Aceite:** Modelo sem tools nativas pode executar fixture por JSON; saída inválida nunca vira ação; incompatibilidade é explícita.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; fallback JSON validado e rejeição de shape perigoso passam; compactação/troca real de modelo ainda não.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; fallback JSON validado, perfis bounded de contexto/saída, mismatch explícito de modelo e compactação que preserva restrições/efeitos incertos passam; troca real de provider e tool calling nativo ainda não.
 
 ### T020 — Orquestrar runs e limites
 
@@ -274,7 +274,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T016,T017.
 - **Trabalho e entrega:** Implementar estados, uma execução com efeitos, filas, orçamentos e vínculo da intenção às tools.
 - **Aceite:** Estados terminais consistentes; limite e aprovação pausam efeitos; duas sessões não disputam desktop.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; estados terminais, run busy, timeout, orçamento de prompt/saída/steps/duração, estagnação, vínculo de call e bloqueio de dois runs concorrentes na mesma sessão persistida estão implementados; arbitragem de desktop entre múltiplas sessões e reconciliação de unknown ainda seguem abertos.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; estados terminais, run busy, timeout, orçamento de prompt/saída/steps/duração, estagnação, vínculo de call, lease global com heartbeat e bloqueio de dois runs concorrentes na mesma sessão persistida estão implementados; reconciliação de unknown externa ainda segue aberta.
 
 ### T021 — Persistir sessões e recuperar histórico
 
@@ -283,7 +283,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T013,T020.
 - **Trabalho e entrega:** Criar DB versionado, transações, journal, migrações e recuperação de run interrupted.
 - **Aceite:** Reinício preserva mensagens confirmadas e não repete efeitos; corrupção recebe diagnóstico recuperável.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T021–T025 — dados e acessibilidade](T021-T025-dados-acessibilidade.md). SQLite, migração, recovery, diagnóstico de corrupção, retenção determinística, journal idempotente e arbitragem de um run ativo por sessão passam; backup/migração interrompida do instalador ainda não.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T021–T025 — dados e acessibilidade](T021-T025-dados-acessibilidade.md). SQLite v1→v3, recovery, diagnóstico de corrupção, retenção determinística, journal idempotente, lease global e backup online reaberto passam; migração interrompida do instalador e restauração operacional ainda não.
 
 ### T022 — Guardar segredos e controlar retenção
 
@@ -292,7 +292,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T017,T021.
 - **Trabalho e entrega:** Integrar keyring, redaction, exclusão/exportação e aviso de envio remoto.
 - **Aceite:** Segredo não aparece em logs/DB/exportação; keyring indisponível não gera arquivo plaintext implícito.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, adaptador `vox-secrets` com libsecret/fixture e formulário básico de conta + campo mascarado passam; o segredo só é injetado no ambiente do core privado e nunca no SQLite. Security.framework/Windows Credential Manager, endpoint/modelo editáveis e aplicação sem reabrir o core continuam pendentes.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, adaptador `vox-secrets` com libsecret/fixture e formulário básico de conta + campo mascarado passam; o segredo só é injetado no ambiente do core privado e nunca no SQLite. Security.framework/Windows Credential Manager, validação remota e aplicação sem reabrir o core continuam pendentes.
 
 ### T023 — Implementar parada ponta a ponta
 
@@ -391,7 +391,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T014,T024.
 - **Trabalho e entrega:** Resolver apps instalados, lançar com argumentos seguros e abrir pasta/arquivo no SO.
 - **Aceite:** Abrir Discord/VS Code não depende de caminho fixo; app ausente recebe orientação; spawn não basta como sucesso.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; `apps.resolve` consulta um catálogo bounded no PATH sem spawn, o planejador reconhece aliases de Discord/VS Code/Chrome como `apps.launch` externo e launch/open usam argv com `observed:false` quando só houve spawn; prova de Discord/VS Code e catálogo por SO ainda abertas.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; `apps.resolve` consulta um catálogo bounded no PATH sem spawn e, no Linux, também percorre entradas `.desktop` limitadas; o planejador reconhece aliases de Discord/VS Code/Chrome como `apps.launch` externo e launch/open usam argv com `observed:false` quando só houve spawn; prova de Discord/VS Code e catálogo por SO ainda abertas.
 
 ### T034 — Gerenciar processos
 
@@ -589,7 +589,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T015,T047,T048,T049.
 - **Trabalho e entrega:** Empacotar runtime/core/UI/deps; definir formatos, assinatura, SBOM e hashes por plataforma.
 - **Aceite:** Instalação limpa não precisa de Node/Pi; permissões do pacote final funcionam.
-- **Execução:** status: parcial forte; há apenas [bundle de desenvolvimento](../docs/RELEASE.md), com Node embutido, dependências copiadas, manifesto SHA-256, SBOM dev CycloneDX 1.5 e smoke reproduzível de instalação/troca/rollback/desinstalação em Linux, ainda sem instalador final, assinatura, notices/SBOM de release ou atualização entre versões reais.
+- **Execução:** status: parcial forte; há [bundle de desenvolvimento](../docs/RELEASE.md), com Node embutido, dependências copiadas, manifesto SHA-256, SBOM dev CycloneDX 1.5, launcher/instalador Linux e smoke reproduzível de instalação/troca/rollback/desinstalação, ainda sem instalador final multiplataforma, assinatura, notices/SBOM de release ou atualização entre versões reais.
 
 ### T056 — Validar instalação e atualização
 
@@ -598,7 +598,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T021,T055.
 - **Trabalho e entrega:** Testar instalar, atualizar, migrar, rollback compatível e desinstalar com preservação/remoção de dados.
 - **Aceite:** Matriz limpa aprovada em cada SO; artefato corrompido não é aceito.
-- **Execução:** status: parcial; `scripts/validate-bundle.sh` valida manifesto/SBOM e cobre instalação temporária, preservação durante upgrade, rollback de release e escolha explícita de remoção de dados no bundle Linux; matriz limpa por SO, migração entre versões reais e instalador final continuam externos.
+- **Execução:** status: parcial forte no Linux; `scripts/validate-bundle.sh` valida manifesto/SBOM, exercita o launcher instalado, preservação durante upgrade, rollback de release e escolha explícita de remoção de dados; `pnpm package:linux` gera tarball + SHA-256. Matriz limpa por SO, migração entre versões reais e instalador final continuam externos.
 
 ### T057 — Executar beta de uso diário
 
@@ -871,7 +871,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Testar migração N−1→N, rollback de falha e recuperação de unknown.
   - [ ] Testar exclusão/exportação redigida e não persistência de áudio/aprovação reutilizável.
 - **Aceite:** Crash entre efeito e resultado não provoca replay; migrações preservam mensagens e falham de forma recuperável.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; SQLite v1→v2, reopen, preferences, recovery, retenção, export redacted, approvals auditáveis/invalidados e idempotência têm testes; rollback interrompido e prova negativa de áudio/approval reutilizável no pacote ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; SQLite v1→v3, reopen, preferences, recovery, retenção, export redacted, approvals auditáveis/invalidados, lease, backup online e idempotência têm testes; rollback interrompido e prova negativa de áudio/approval reutilizável no pacote ainda faltam.
 
 ### T079 — Construir fixture semântica adversarial
 
@@ -927,4 +927,4 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Repetir modos/voz/parada em cada SO e ambiente Wayland publicado.
   - [ ] Registrar evidências do pacote e atualizar matriz de limitações.
 - **Aceite:** Janela flutuante e fluxos funcionam sem Node/Pi instalados; diferenças do pacote final são corrigidas antes da beta.
-- **Execução:** status: parcial; [RELEASE](../docs/RELEASE.md) define o smoke obrigatório, e `scripts/validate-bundle.sh` passou no bundle Linux com Node, dependências, manifesto SHA-256 e SBOM dev; isso não substitui instalador final nem aceite fora da árvore de desenvolvimento.
+- **Execução:** status: parcial forte no Linux; [RELEASE](../docs/RELEASE.md) define o smoke obrigatório, e `scripts/validate-bundle.sh` passou no bundle Linux com Node, dependências, manifesto SHA-256, SBOM dev e launcher instalado; isso não substitui instalador final nem aceite fora da árvore de desenvolvimento.

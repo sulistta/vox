@@ -63,6 +63,48 @@ pub fn validate_line(line: &str) -> Result<Value, ProtocolError> {
             require_string(object, "session_id")?;
             require_string(object, "run_id")?;
             require_string(object, "content")?;
+            if let Some(source) = object.get("source") {
+                if !matches!(source.as_str(), Some("text" | "voice")) {
+                    return Err(ProtocolError::InvalidField("source"));
+                }
+            }
+            if object.get("model_ref").is_some() {
+                require_string(object, "model_ref")?;
+            }
+            if let Some(context) = object.get("context") {
+                let messages = context
+                    .as_array()
+                    .ok_or(ProtocolError::InvalidField("context"))?;
+                if messages.len() > 100 {
+                    return Err(ProtocolError::InvalidField("context"));
+                }
+                for message in messages {
+                    let message = message
+                        .as_object()
+                        .ok_or(ProtocolError::InvalidField("context"))?;
+                    if !matches!(
+                        message.get("role").and_then(Value::as_str),
+                        Some("system" | "user" | "assistant" | "tool")
+                    ) {
+                        return Err(ProtocolError::InvalidField("context.role"));
+                    }
+                    if message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_none_or(|content| content.len() > 64 * 1024)
+                    {
+                        return Err(ProtocolError::InvalidField("context.content"));
+                    }
+                    if let Some(effect) = message.get("effect") {
+                        if !matches!(
+                            effect.as_str(),
+                            Some("none" | "pending" | "applied" | "unknown")
+                        ) {
+                            return Err(ProtocolError::InvalidField("context.effect"));
+                        }
+                    }
+                }
+            }
         }
         "turn.cancel" => {
             require_string(object, "request_id")?;
@@ -167,6 +209,31 @@ mod tests {
             "content": "hello"
         });
         assert!(validate_line(&value.to_string()).is_ok());
+    }
+
+    #[test]
+    fn accepts_bounded_context_and_rejects_invalid_effect() {
+        let valid = serde_json::json!({
+            "type": "turn.start",
+            "request_id": "request",
+            "session_id": "session",
+            "run_id": "run",
+            "content": "hello",
+            "context": [{"role":"system","content":"constraint"},{"role":"tool","content":"uncertain","effect":"unknown"}]
+        });
+        assert!(validate_line(&valid.to_string()).is_ok());
+        let invalid = serde_json::json!({
+            "type": "turn.start",
+            "request_id": "request",
+            "session_id": "session",
+            "run_id": "run",
+            "content": "hello",
+            "context": [{"role":"tool","content":"x","effect":"success"}]
+        });
+        assert_eq!(
+            validate_line(&invalid.to_string()),
+            Err(ProtocolError::InvalidField("context.effect"))
+        );
     }
 
     #[test]

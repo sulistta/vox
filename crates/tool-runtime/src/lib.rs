@@ -707,6 +707,27 @@ impl ToolRuntime {
                 return Ok(result);
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some((path, argv, desktop_entry)) = linux_desktop_entry(&normalized) {
+            let mut result = ToolResult::success(
+                serde_json::json!({
+                    "name": name,
+                    "program": path,
+                    "argv": argv,
+                    "resolved": true,
+                    "desktop_entry": desktop_entry
+                }),
+                "none",
+                started,
+            );
+            result.verification = Some(serde_json::json!({
+                "resolved": true,
+                "observed": true,
+                "spawned": false,
+                "catalog": "desktop-entry"
+            }));
+            return Ok(result);
+        }
         Err(ToolError::ApplicationUnavailable(format!(
             "{name} was not found in the executable catalog"
         )))
@@ -1059,6 +1080,126 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopEntryApp {
+    name: String,
+    program: String,
+    argv: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_desktop_entry(contents: &str) -> Option<DesktopEntryApp> {
+    let mut in_desktop_group = false;
+    let mut name = None;
+    let mut exec = None;
+    let mut try_exec = None;
+    let mut hidden = false;
+    let mut application_type = false;
+    for raw_line in contents.lines().take(512) {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_group = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_group || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "Type" => application_type = value == "Application",
+            "Name" => name = Some(value.to_owned()),
+            "Exec" => exec = Some(value.to_owned()),
+            "TryExec" => try_exec = Some(value.to_owned()),
+            "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
+            _ if key.starts_with("Name[") && name.is_none() => name = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    if !application_type || hidden {
+        return None;
+    }
+    let name = name?.trim().to_owned();
+    let command = exec.or(try_exec)?;
+    let mut tokens = command.split_whitespace();
+    let program = tokens.next()?.to_owned();
+    if program.is_empty() || program.starts_with('%') || program.contains('=') {
+        return None;
+    }
+    let argv = tokens
+        .filter(|token| !token.starts_with('%'))
+        .map(str::to_owned)
+        .collect();
+    Some(DesktopEntryApp {
+        name,
+        program,
+        argv,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_entry(name: &str) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+    let mut roots = Vec::new();
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(PathBuf::from(data_home));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join(".local/share"));
+    }
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            vec![
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share"),
+            ]
+        });
+    roots.extend(data_dirs);
+
+    let mut inspected = 0usize;
+    for root in roots {
+        let applications = root.join("applications");
+        let Ok(entries) = fs::read_dir(applications) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if inspected >= 256 {
+                return None;
+            }
+            inspected += 1;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > 64 * 1024 {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(parsed) = parse_desktop_entry(&contents) else {
+                continue;
+            };
+            if parsed.name.trim().to_lowercase() != name {
+                continue;
+            }
+            let candidate = Path::new(&parsed.program);
+            let program = if candidate.is_absolute() {
+                is_executable(candidate).then(|| candidate.to_path_buf())
+            } else {
+                executable_from_path(&parsed.program)
+            }?;
+            return Some((program, parsed.argv, path));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,6 +1249,22 @@ mod tests {
             runtime.resolve_app("vox-command-that-does-not-exist"),
             Err(ToolError::ApplicationUnavailable(_))
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_desktop_entry_parser_is_bounded_and_never_executes_the_entry() {
+        let parsed = parse_desktop_entry(
+            "[Desktop Entry]\nType=Application\nName=Example Editor\nExec=sh -c %U\nHidden=false\n",
+        )
+        .expect("valid desktop entry");
+        assert_eq!(parsed.name, "Example Editor");
+        assert_eq!(parsed.program, "sh");
+        assert_eq!(parsed.argv, ["-c"]);
+        assert!(parse_desktop_entry(
+            "[Desktop Entry]\nType=Application\nName=Hidden\nExec=sh\nHidden=true\n"
+        )
+        .is_none());
     }
 
     #[test]

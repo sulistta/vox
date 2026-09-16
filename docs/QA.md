@@ -19,8 +19,12 @@ diário. Uma linha `pendente` não é um resultado aprovado.
 | Política | aprovação ausente, hash divergente, expiração e replay single-use | `crates/policy/src/lib.rs`, `crates/broker/src/lib.rs` | passou |
 | Efeito de arquivo | raiz permitida, traversal, symlink externo, overwrite e rename atômico | `crates/tool-runtime/src/lib.rs` | passou |
 | Saída/processo | argv sem interpolação shell, ambiente mínimo, saída grande, timeout, grupo privado, identidade PID/comando/start-time e recusa de mismatch | `crates/tool-runtime/src/lib.rs` | passou localmente |
+| Supervisor ruidoso | EOF inesperado e linha NDJSON inválida do core geram diagnóstico, sem travar o chamador | `crates/supervisor/tests/supervisor.rs`, `crates/supervisor/tests/fixtures/{exit,invalid}.mjs` | passou localmente |
 | Dados | redaction, idempotência, migration/reopen, recovery, diagnóstico de corrupção, approvals auditáveis e bloqueio de exclusão de run ativo | `crates/session-store/src/lib.rs` | passou localmente |
 | Journal de efeitos | intenção `pending`, resultado terminal, `pending`→`unknown` no reopen e bloqueio de segundo completion | `crates/session-store/src/lib.rs`, `apps/desktop/src/main.rs` | passou localmente; reconciliação externa ainda não |
+| Lease global do desktop | segunda instância é recusada; heartbeat, release e recuperação após timeout | `crates/session-store/src/lib.rs`, `apps/desktop/src/main.rs` | passou em duas conexões SQLite; crash real do processo continua externo |
+| Contexto/modelo | contexto bounded preserva restrições/unknown; perfil e probe não inventam capabilities | `packages/agent-core/src/context.ts`, `packages/provider-adapters/src/index.ts` | passou com provider fake e servidor HTTP local |
+| Instalador Linux | manifesto/SBOM, cópia atômica, launcher, preservação e remoção explícita de dados | `packaging/linux`, `scripts/validate-bundle.sh` | passou no smoke do bundle dev; não é instalador Windows/macOS |
 | Semântica | alvo ambíguo, referência stale, toggle, senha redacted e limites de snapshot | `crates/desktop-access/src/lib.rs` | passou na fixture |
 | UI | streaming sem duplicação, compacto preservando run, erro/terminalidade e descarte de eventos stale por `run_id` | `apps/desktop/src/ui_state.rs` | passou no reducer |
 

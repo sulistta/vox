@@ -1,5 +1,6 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{backup::Backup, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -15,6 +16,10 @@ pub enum StoreError {
     SessionNotFound,
     #[error("session has an active run")]
     ActiveRun,
+    #[error("backup destination already exists")]
+    BackupDestinationExists,
+    #[error("desktop lease is not owned by this instance")]
+    LeaseNotOwned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,7 +74,7 @@ pub struct SessionStore {
     connection: Connection,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 impl SessionStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -107,6 +112,10 @@ impl SessionStore {
             "CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL, schema_version INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, call_id TEXT NOT NULL, args_hash TEXT NOT NULL, scope TEXT NOT NULL, expires_at TEXT NOT NULL, state TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS approvals_run_state ON approvals(run_id, state);",
+        )?;
+        self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS desktop_lease(id INTEGER PRIMARY KEY CHECK (id = 1), owner_id TEXT NOT NULL, heartbeat_at INTEGER NOT NULL);",
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", params![CURRENT_SCHEMA_VERSION])?;
         Ok(())
@@ -191,6 +200,67 @@ impl SessionStore {
             [],
         )?;
         Ok(changed)
+    }
+
+    /// Acquire the single desktop lease. A lease older than `stale_after` is
+    /// treated as orphaned, which lets a crashed desktop recover without a
+    /// manual database edit. The active owner renews it from the UI loop.
+    pub fn acquire_desktop_lease(
+        &self,
+        owner_id: &str,
+        stale_after: Duration,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "INSERT INTO desktop_lease(id, owner_id, heartbeat_at) VALUES (1, ?1, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, heartbeat_at=excluded.heartbeat_at
+             WHERE desktop_lease.heartbeat_at < unixepoch() - ?2 OR desktop_lease.owner_id = excluded.owner_id",
+            params![owner_id, stale_after.as_secs().max(1) as i64],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn renew_desktop_lease(&self, owner_id: &str) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE desktop_lease SET heartbeat_at=unixepoch() WHERE id=1 AND owner_id=?1",
+            params![owner_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn release_desktop_lease(&self, owner_id: &str) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "DELETE FROM desktop_lease WHERE id=1 AND owner_id=?1",
+            params![owner_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Create a consistent SQLite backup without copying a live file by hand.
+    /// The destination must be new so an installer cannot silently overwrite a
+    /// previous recovery point.
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<(), StoreError> {
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::BackupDestinationExists);
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                StoreError::Sql(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+            })?;
+        }
+        let result = (|| {
+            let mut target = Connection::open(destination)?;
+            {
+                let backup = Backup::new(&self.connection, &mut target)?;
+                backup.run_to_completion(32, Duration::from_millis(10), None)?;
+            }
+            target.execute_batch("PRAGMA foreign_keys = ON;")?;
+            Ok::<(), rusqlite::Error>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(destination);
+        }
+        result.map_err(StoreError::Sql)
     }
 
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, StoreError> {
@@ -764,6 +834,77 @@ mod tests {
                 .unwrap());
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn desktop_lease_allows_one_owner_and_recovers_after_release_or_timeout() {
+        let path = std::env::temp_dir().join(format!(
+            "vox-lease-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = SessionStore::open(&path).unwrap();
+        let second = SessionStore::open(&path).unwrap();
+        assert!(first
+            .acquire_desktop_lease("desktop-a", Duration::from_secs(30))
+            .unwrap());
+        assert!(!second
+            .acquire_desktop_lease("desktop-b", Duration::from_secs(30))
+            .unwrap());
+        assert!(first.renew_desktop_lease("desktop-a").unwrap());
+        assert!(!second.renew_desktop_lease("desktop-b").unwrap());
+        assert!(first.release_desktop_lease("desktop-a").unwrap());
+        assert!(second
+            .acquire_desktop_lease("desktop-b", Duration::from_secs(30))
+            .unwrap());
+        assert!(second.release_desktop_lease("desktop-b").unwrap());
+        assert!(first
+            .acquire_desktop_lease("desktop-a", Duration::from_secs(30))
+            .unwrap());
+        first
+            .connection
+            .execute(
+                "UPDATE desktop_lease SET heartbeat_at=unixepoch()-100 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(second
+            .acquire_desktop_lease("desktop-b", Duration::from_secs(30))
+            .unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn backup_to_creates_a_reopenable_consistent_database_without_overwriting() {
+        let path = std::env::temp_dir().join(format!(
+            "vox-backup-source-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let backup_path = path.with_extension("backup.sqlite");
+        let store = SessionStore::open(&path).unwrap();
+        let session = store.create_session("backup").unwrap();
+        store
+            .append_message(&session, "user", "preserve me", 1)
+            .unwrap();
+        store.backup_to(&backup_path).unwrap();
+        assert!(matches!(
+            store.backup_to(&backup_path),
+            Err(StoreError::BackupDestinationExists)
+        ));
+        let restored = SessionStore::open(&backup_path).unwrap();
+        assert_eq!(
+            restored.messages(&session).unwrap()[0].content,
+            "preserve me"
+        );
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(backup_path);
     }
 
     #[test]

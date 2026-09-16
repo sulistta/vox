@@ -139,3 +139,13 @@ fn unexpected_core_exit_is_reported_without_hanging_the_caller() {
         .expect_err("unexpected stdout close must be surfaced as a protocol diagnostic");
     assert!(event.to_string().contains("stdout closed unexpectedly"));
 }
+
+#[test]
+fn invalid_core_stdout_is_reported_as_a_protocol_diagnostic() {
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/invalid.mjs");
+    let supervisor = AgentSupervisor::spawn("node", &entry).expect("spawn invalid core");
+    let event = poll_with_timeout(&supervisor, Duration::from_secs(2))
+        .expect("invalid stdout diagnostic")
+        .expect_err("invalid core stdout must not be accepted");
+    assert!(event.to_string().contains("invalid JSON"));
+}

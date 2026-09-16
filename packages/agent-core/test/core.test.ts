@@ -47,6 +47,28 @@ test("core performs handshake and a fake textual turn", async () => {
   proc.stdin.end();
 });
 
+test("core exposes bounded model capabilities and rejects a mismatched model request", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], { cwd: packageRoot, stdio: ["pipe", "pipe", "pipe"] });
+  const events = collect(proc);
+  proc.stdin.write('{"type":"initialize"}\n');
+  const initialized = (await events.next()).value!;
+  assert.equal((initialized.capabilities as string[]).includes("context_chars:16384"), true);
+  proc.stdin.write('{"type":"session.open","request_id":"req-model","session_id":"s-model"}\n');
+  await events.next();
+  proc.stdin.write(JSON.stringify({
+    type: "turn.start",
+    request_id: "req-model-turn",
+    session_id: "s-model",
+    run_id: "r-model",
+    model_ref: "not-active",
+    content: "oi",
+  }) + "\n");
+  const failed = (await events.next()).value!;
+  assert.equal(failed.type, "run.failed");
+  assert.equal(failed.error_code, "MODEL_MISMATCH");
+  proc.stdin.end();
+});
+
 test("core pauses for the broker and resumes only with the matching tool result", async () => {
   const proc = spawn(process.execPath, ["--import", "tsx", core], {
     cwd: packageRoot,

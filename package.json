@@ -12,6 +12,7 @@
     "typecheck": "pnpm build && tsc --noEmit",
     "t002": "node spikes/t002-runtime/run.mjs",
     "package:dev": "./scripts/package-dev.sh",
+    "package:linux": "./scripts/package-linux.sh",
     "bundle:validate": "./scripts/validate-bundle.sh",
     "benchmark:core": "node scripts/benchmark-core.mjs"
   },

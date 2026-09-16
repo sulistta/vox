@@ -5,12 +5,22 @@ export interface ProviderCapabilities {
   native_tools: boolean;
   json_mode: boolean;
   multimodal: false;
+  context_chars: number;
+  max_output_chars: number;
 }
 
 export interface TextProvider {
   readonly id: string;
+  readonly model_ref?: string;
   readonly capabilities: ProviderCapabilities;
   stream(prompt: string, signal: AbortSignal): AsyncIterable<string>;
+}
+
+export interface ProviderProbeResult {
+  available: boolean;
+  model_ids: string[];
+  status?: number;
+  error?: string;
 }
 
 export interface NormalizedToolCall {
@@ -53,7 +63,15 @@ function validateEndpoint(baseUrl: string): void {
 
 export class FakeTextProvider implements TextProvider {
   readonly id = "fake-text";
-  readonly capabilities = { streaming: true, native_tools: false, json_mode: false, multimodal: false } as const;
+  readonly model_ref = "fake-text";
+  readonly capabilities = {
+    streaming: true,
+    native_tools: false,
+    json_mode: false,
+    multimodal: false,
+    context_chars: 16 * 1024,
+    max_output_chars: 64 * 1024,
+  } as const;
 
   async *stream(prompt: string, signal: AbortSignal): AsyncIterable<string> {
     const response = prompt.toLowerCase().includes("janelas") || prompt.toLowerCase().includes("windows")
@@ -71,6 +89,8 @@ export interface OpenAICompatibleOptions {
  baseUrl: string;
  model: string;
  apiKey?: string;
+ contextChars?: number;
+ maxOutputChars?: number;
 }
 
 function extractOpenAIContent(value: unknown, delta: boolean): string | undefined {
@@ -86,13 +106,23 @@ function extractOpenAIContent(value: unknown, delta: boolean): string | undefine
 
 export class OpenAICompatibleTextProvider implements TextProvider {
   readonly id = "openai-compatible";
+  readonly model_ref: string;
   // This adapter currently sends text-only requests. Tool selection remains
   // conservative and broker-validated in agent-core; do not overclaim native
   // provider tool or JSON-mode support in the handshake.
-  readonly capabilities = { streaming: true, native_tools: false, json_mode: false, multimodal: false } as const;
+  readonly capabilities: ProviderCapabilities;
 
   constructor(private readonly options: OpenAICompatibleOptions) {
     validateEndpoint(options.baseUrl);
+    this.model_ref = options.model;
+    this.capabilities = {
+      streaming: true,
+      native_tools: false,
+      json_mode: false,
+      multimodal: false,
+      context_chars: options.contextChars ?? 32 * 1024,
+      max_output_chars: options.maxOutputChars ?? 128 * 1024,
+    };
   }
 
   async *stream(prompt: string, signal: AbortSignal): AsyncIterable<string> {
@@ -173,9 +203,82 @@ export function providerFromEnvironment(env: NodeJS.ProcessEnv = process.env): T
     const baseUrl = env.VOX_PROVIDER_BASE_URL;
     const model = env.VOX_PROVIDER_MODEL;
     if (!baseUrl || !model) throw new ProviderError("CONFIG_ERROR", "VOX_PROVIDER_BASE_URL and VOX_PROVIDER_MODEL are required", false);
-    return new OpenAICompatibleTextProvider({ baseUrl, model, apiKey: env.VOX_PROVIDER_API_KEY });
+    return new OpenAICompatibleTextProvider({
+      baseUrl,
+      model,
+      apiKey: env.VOX_PROVIDER_API_KEY,
+      contextChars: positiveEnvironmentNumber(env.VOX_PROVIDER_CONTEXT_CHARS, 32 * 1024),
+      maxOutputChars: positiveEnvironmentNumber(env.VOX_PROVIDER_MAX_OUTPUT_CHARS, 128 * 1024),
+    });
   }
   return new FakeTextProvider();
+}
+
+function positiveEnvironmentNumber(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 4 * 1024 * 1024) : fallback;
+}
+
+/**
+ * Probe a compatible endpoint without treating an HTTP response as a model
+ * capability claim. Only bounded model ids are returned; response bodies and
+ * credentials never enter the error message.
+ */
+export async function probeOpenAICompatible(
+  options: OpenAICompatibleOptions,
+  timeoutMs = 3_000,
+  signal?: AbortSignal,
+): Promise<ProviderProbeResult> {
+  validateEndpoint(options.baseUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("PROBE_TIMEOUT"), Math.max(100, timeoutMs));
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const headers: Record<string, string> = {};
+    if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
+    const response = await fetch(`${options.baseUrl.replace(/\/$/u, "")}/models`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return {
+        available: false,
+        model_ids: [],
+        status: response.status,
+        error: response.status === 401 || response.status === 403 ? "autenticação recusada" : `endpoint respondeu ${response.status}`,
+      };
+    }
+    const body = await response.text();
+    if (body.length > 1024 * 1024) return { available: false, model_ids: [], error: "resposta de capabilities excedeu o limite" };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return { available: false, model_ids: [], error: "endpoint retornou JSON inválido" };
+    }
+    const entries = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as { data?: unknown }).data
+      : undefined;
+    if (!Array.isArray(entries)) return { available: false, model_ids: [], error: "endpoint não retornou uma lista de modelos" };
+    const model_ids = entries
+      .map((entry) => entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string" ? (entry as { id: string }).id : undefined)
+      .filter((id): id is string => Boolean(id && id.length <= 128))
+      .slice(0, 64);
+    return { available: true, model_ids };
+  } catch (error) {
+    const message = controller.signal.reason === "PROBE_TIMEOUT"
+      ? "probe excedeu o tempo limite"
+      : signal?.aborted
+        ? "probe cancelado"
+        : "endpoint indisponível";
+    return { available: false, model_ids: [], error: message };
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export function plannedTool(prompt: string): PlannedToolCall | undefined {

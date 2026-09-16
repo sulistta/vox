@@ -12,6 +12,7 @@ import {
 } from "@vox/protocol";
 import { ProviderError, plannedTool, providerFromEnvironment } from "@vox/provider-adapters";
 import { RunBudget, RunLimitError } from "./limits.js";
+import { compactContext, ContextCompactionError, formatContext } from "./context.js";
 
 const provider = providerFromEnvironment();
 const sessions = new Set<string>();
@@ -74,14 +75,39 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
     return;
   }
   const controller = new AbortController();
-  const budget = new RunBudget();
+  if (request.model_ref && provider.model_ref && request.model_ref !== provider.model_ref) {
+    send({
+      type: "run.failed",
+      session_id: request.session_id,
+      run_id: request.run_id,
+      error_code: "MODEL_MISMATCH",
+      error: `requested model ${request.model_ref} is not the active provider model`,
+      retryable: false,
+    });
+    return;
+  }
+  const budget = new RunBudget({
+    maxPromptChars: Math.min(64 * 1024, provider.capabilities.context_chars),
+    maxOutputChars: Math.min(256 * 1024, provider.capabilities.max_output_chars),
+  });
   runs.set(request.run_id, { controller, sessionId: request.session_id });
   state(request.session_id, request.run_id, "thinking");
   let seq = 0;
   let content = "";
   let timeout: NodeJS.Timeout | undefined;
   try {
-    budget.validatePrompt(request.content);
+    let prompt = request.content;
+    if (request.context && request.context.length > 0) {
+      try {
+        const contextBudget = budget.maxPromptChars - request.content.length - 1;
+        const compacted = compactContext(request.context, contextBudget);
+        prompt = formatContext(compacted.messages, request.content);
+      } catch (error) {
+        if (error instanceof ContextCompactionError) throw new RunLimitError("CONTEXT_LIMIT", error.message);
+        throw error;
+      }
+    }
+    budget.validatePrompt(prompt);
     timeout = setTimeout(() => controller.abort("RUN_TIMEOUT"), budget.maxDurationMs);
     const plan = plannedTool(request.content);
     if (plan) {
@@ -98,7 +124,7 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
       }
       state(request.session_id, request.run_id, "thinking");
     }
-    for await (const delta of provider.stream(request.content, controller.signal)) {
+    for await (const delta of provider.stream(prompt, controller.signal)) {
       content += delta;
       budget.validateOutput(content);
       seq += 1;
@@ -125,7 +151,22 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
 
 function handle(message: IpcMessage): void {
   if (message.type === "initialize") {
-    send({ type: "initialized", protocol: PROTOCOL_VERSION, runtime: process.version, build: "vox-agent-core-dev", capabilities: ["text", "stream", "cancel", "tool.request", provider.id] });
+    send({
+      type: "initialized",
+      protocol: PROTOCOL_VERSION,
+      runtime: process.version,
+      build: "vox-agent-core-dev",
+      capabilities: [
+        "text",
+        "stream",
+        "cancel",
+        "tool.request",
+        provider.id,
+        `context_chars:${provider.capabilities.context_chars}`,
+        `max_output_chars:${provider.capabilities.max_output_chars}`,
+        ...(provider.model_ref ? [`model:${provider.model_ref}`] : []),
+      ],
+    });
   } else if (message.type === "session.open") {
     sessions.add(message.session_id);
     send({ type: "session.opened", request_id: message.request_id, session_id: message.session_id });

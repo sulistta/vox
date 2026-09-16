@@ -29,6 +29,10 @@ fi
 cp -- "$node_bin" "$out_dir/runtime/node"
 chmod +x "$out_dir/runtime/node"
 cp -- docs/DEPENDENCIES.md "$out_dir/DEPENDENCIES.md"
+cp -- scripts/verify-bundle-manifest.mjs "$out_dir/verify-bundle-manifest.mjs"
+mkdir -p -- "$out_dir/linux"
+cp -- packaging/linux/install.sh "$out_dir/linux/install.sh"
+cp -- packaging/linux/uninstall.sh "$out_dir/linux/uninstall.sh"
 cat >"$out_dir/run.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -45,6 +49,9 @@ This bundle contains the Node.js executable used during packaging and can be
 started with ./run.sh. It is still a development bundle: it has not passed
 the multi-platform installer, signing, SBOM, update, rollback or permission
 gates from T055/T056/T082.
+
+On Linux, linux/install.sh installs this bundle atomically under a user prefix;
+linux/uninstall.sh preserves application data unless --remove-data is explicit.
 EOF
 node scripts/write-bundle-sbom.mjs "$out_dir"
 node scripts/write-bundle-manifest.mjs "$out_dir"

@@ -43,6 +43,20 @@ test("accepts a reviewed voice turn and rejects an unknown source", () => {
   );
 });
 
+test("accepts bounded context and rejects an invalid effect", () => {
+  const parsed = parseMessage(contract("valid-turn.json", {
+    context: [
+      { role: "system", content: "keep this constraint" },
+      { role: "tool", content: "uncertain", effect: "unknown" },
+    ],
+  }));
+  assert.equal(parsed.type, "turn.start");
+  assert.throws(
+    () => parseMessage(contract("valid-turn.json", { context: [{ role: "tool", content: "x", effect: "success" }] })),
+    (error: unknown) => error instanceof ProtocolError && error.code === "INVALID_FIELD",
+  );
+});
+
 test("rejects invalid JSON and unknown types", () => {
   assert.throws(() => parseMessage("{"), (error) => error instanceof ProtocolError && error.code === "INVALID_JSON");
   assert.throws(() => parseMessage('{"type":"delete_everything"}'), (error) => error instanceof ProtocolError && error.code === "UNKNOWN_TYPE");

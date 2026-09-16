@@ -77,12 +77,32 @@ struct VoxApp {
     provider_endpoint_input: String,
     provider_model_input: String,
     provider_keyring_status: Option<String>,
+    desktop_lease_owner: Option<String>,
+    last_lease_renewed: Instant,
 }
 
 impl VoxApp {
     fn new() -> Self {
         let provisional_session_id = Uuid::new_v4().to_string();
-        let (store, storage_warning) = persistent_store();
+        let (store, mut storage_warning) = persistent_store();
+        let lease_candidate = Uuid::new_v4().to_string();
+        let desktop_lease_owner = match store.as_ref() {
+            Some(store) => match store
+                .acquire_desktop_lease(&lease_candidate, Duration::from_secs(30))
+            {
+                Ok(true) => Some(lease_candidate),
+                Ok(false) => {
+                    storage_warning = Some("outra instância do Vox já controla o desktop".into());
+                    None
+                }
+                Err(error) => {
+                    storage_warning = Some(format!("lease do desktop indisponível: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let can_start_core = store.is_none() || desktop_lease_owner.is_some();
         let keep_on_top = store
             .as_ref()
             .and_then(|store| store.preference("keep_on_top").ok().flatten())
@@ -127,10 +147,14 @@ impl VoxApp {
         } else {
             "Modelo de referência · Local".into()
         };
-        let session_id = store
-            .as_ref()
-            .and_then(|store| store.create_session("Vox").ok())
-            .unwrap_or(provisional_session_id);
+        let session_id = if can_start_core {
+            store
+                .as_ref()
+                .and_then(|store| store.create_session("Vox").ok())
+                .unwrap_or(provisional_session_id)
+        } else {
+            provisional_session_id
+        };
         let runtime_config = RuntimeConfig {
             xa11y_command: std::env::var_os("VOX_XA11Y_BIN").map(std::path::PathBuf::from),
             ..RuntimeConfig::default()
@@ -169,28 +193,35 @@ impl VoxApp {
             provider_endpoint_input,
             provider_model_input,
             provider_keyring_status: None,
+            desktop_lease_owner,
+            last_lease_renewed: Instant::now(),
         };
         app.view.model_label = model_label;
-        match AgentSupervisor::spawn_with_env(
-            default_node(),
-            default_entry(),
-            &app.core_environment,
-        ) {
-            Ok(supervisor) => {
-                let initialized = supervisor.initialize().is_ok();
-                let opened = supervisor
-                    .open_session("open-session", &app.session_id)
-                    .is_ok();
-                app.view.connected = initialized && opened;
-                app.view.status = if app.view.connected {
-                    "conectado ao core"
-                } else {
-                    "core iniciado, handshake pendente"
+        if can_start_core {
+            match AgentSupervisor::spawn_with_env(
+                default_node(),
+                default_entry(),
+                &app.core_environment,
+            ) {
+                Ok(supervisor) => {
+                    let initialized = supervisor.initialize().is_ok();
+                    let opened = supervisor
+                        .open_session("open-session", &app.session_id)
+                        .is_ok();
+                    app.view.connected = initialized && opened;
+                    app.view.status = if app.view.connected {
+                        "conectado ao core"
+                    } else {
+                        "core iniciado, handshake pendente"
+                    }
+                    .into();
+                    app.supervisor = Some(supervisor);
                 }
-                .into();
-                app.supervisor = Some(supervisor);
+                Err(error) => app.view.fail(format!("core indisponível: {error}")),
             }
-            Err(error) => app.view.fail(format!("core indisponível: {error}")),
+        } else {
+            app.view.connected = false;
+            app.view.status = "outra instância controla o desktop".into();
         }
         app
     }
@@ -962,6 +993,16 @@ fn persistent_store() -> (Option<SessionStore>, Option<String>) {
     }
 }
 
+impl Drop for VoxApp {
+    fn drop(&mut self) {
+        if let (Some(store), Some(owner)) =
+            (self.store.as_ref(), self.desktop_lease_owner.as_deref())
+        {
+            let _ = store.release_desktop_lease(owner);
+        }
+    }
+}
+
 impl eframe::App for VoxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.window_level_applied {
@@ -972,6 +1013,24 @@ impl eframe::App for VoxApp {
                     egui::WindowLevel::Normal
                 }));
             self.window_level_applied = true;
+        }
+        if self.last_lease_renewed.elapsed() >= Duration::from_secs(5) {
+            let lease_ok = match (self.store.as_ref(), self.desktop_lease_owner.as_deref()) {
+                (Some(store), Some(owner)) => store.renew_desktop_lease(owner).unwrap_or(false),
+                _ => true,
+            };
+            self.last_lease_renewed = Instant::now();
+            if !lease_ok {
+                if self.view.active_run.is_some() {
+                    self.stop();
+                }
+                self.supervisor.take();
+                self.desktop_lease_owner = None;
+                self.view.connected = false;
+                self.view.status = "outra instância controla o desktop".into();
+                self.view.error =
+                    Some("o lease do desktop expirou; nenhum novo efeito será enviado".into());
+            }
         }
         let mut watchdog_restart = false;
         if let Some(supervisor) = self.supervisor.as_ref() {

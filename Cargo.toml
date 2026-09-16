@@ -28,7 +28,7 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 crossbeam-channel = "0.5.15"
 libc = "0.2.176"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["backup", "bundled"] }
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36.2"
 xa11y = { version = "0.14.0", default-features = false }

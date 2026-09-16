@@ -9,6 +9,12 @@ inventário de dependências, além de `sbom.cdx.json` em CycloneDX 1.5 com o
 recorte de componentes Rust/Node usado no bundle dev. Isso ainda não é o
 instalador de T055 nem fecha T060.
 
+O recorte Linux também inclui `linux/install.sh` e `linux/uninstall.sh`: a
+instalação é feita em um prefixo de usuário com troca atômica, o manifesto e o
+SBOM são verificados antes da cópia e a desinstalação preserva os dados até
+`--remove-data` ser informado explicitamente. O tarball Linux pode ser gerado
+com `pnpm package:linux` e recebe um `.sha256` separado.
+
 ## Gate de artefato
 
 Antes de publicar qualquer versão, o artefato deve conter a UI nativa, o core
@@ -37,10 +43,12 @@ com:
 ```sh
 pnpm package:dev /tmp/vox-dev
 pnpm bundle:validate /tmp/vox-dev
+pnpm package:linux /tmp/vox-linux-dev.tar.gz
 ```
 
-Esse smoke valida o manifesto e o SBOM, instala duas cópias temporárias, preserva o SQLite durante uma
-troca v1→v2 e rollback v2→v1, testa que a desinstalação mantém os dados até a
+Esse smoke valida o manifesto e o SBOM, instala duas cópias temporárias pelo
+launcher do bundle, preserva o SQLite durante uma troca v1→v2 e rollback v2→v1,
+testa que a desinstalação mantém os dados até a
 remoção explicitamente solicitada e depois apaga apenas o diretório temporário.
 Ele não substitui o instalador assinado nem a validação Windows/macOS.
 

@@ -44,9 +44,28 @@ run_release "$root/current"
 ln -sfn -- "$root/releases/v1" "$root/current"
 run_release "$root/current"
 
-rm -f -- "$root/current"
-rm -rf -- "$root/releases"
+install_prefix="$root/installed"
+"$bundle/linux/install.sh" --prefix "$install_prefix"
+test -x "$install_prefix/bin/vox"
+status=0
+set +e
+VOX_DATA_DIR="$data" timeout 6s "$install_prefix/bin/vox" >"$root/installed.log" 2>&1
+status=$?
+set -e
+if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+  cat "$root/installed.log" >&2
+  exit "$status"
+fi
 test -f "$data/sessions.sqlite"
+
+"$bundle/linux/uninstall.sh" --prefix "$install_prefix" --data-dir "$data"
+test ! -e "$install_prefix"
+test -f "$data/sessions.sqlite"
+"$bundle/linux/install.sh" --prefix "$install_prefix"
+"$bundle/linux/uninstall.sh" --prefix "$install_prefix" --data-dir "$data" --remove-data
+test ! -e "$install_prefix"
 rm -rf -- "$data"
 test ! -e "$data"
+rm -f -- "$root/current"
+rm -rf -- "$root/releases"
 echo "bundle install/update/rollback/uninstall smoke passed"
