@@ -8,10 +8,10 @@ decisão do usuário; nunca há retry cego.
 | Tool | Efeito | Pré-condição | Pós-condição observável | Timeout/cancelamento | Repetição |
 |---|---|---|---|---|---|
 | `desktop.list_windows` | read | backend de acessibilidade disponível | lista marcada como observada e fresca | chamada nativa; diagnóstico recuperável | segura, nova observação |
-| `desktop.snapshot` | read | sessão AT-SPI/UIA/AX autorizada | snapshot limitado, refs opacas, redaction/truncation explícitas | limites de 512 nós/8 níveis | nova captura, nunca reutilizar stale |
-| `desktop.query` | read | snapshot recebido e query bounded | refs que atendem papel/nome/estado/ação; ambiguidade permanece explícita | somente snapshot; nova captura antes de agir | segura sobre snapshot, não autoriza efeito |
-| `desktop.wait_for` | read | backend nativo e query bounded | ref observada em nova captura ou `unknown` com timeout | polling bounded de até 30 s; cancelamento do run | nova observação, nunca retry de efeito |
-| `desktop.act` | write/unknown | snapshot e ref ainda válidos; approval | dispatch separado da pós-condição; `verified:false` até reobservar | backend nativo; sem sucesso implícito | somente após reconciliação |
+| `desktop.snapshot` | read | sessão AT-SPI/UIA/AX autorizada; `app_pid` opcional deve vir de janela listada | snapshot limitado, refs opacas, texto de nó limitado/redigido, truncation explícita e PID observado | limites de 512 nós/8 níveis; ids curtos e opacos; escopo por processo evita varrer árvores alheias | nova captura, nunca reutilizar stale |
+| `desktop.query` | read | `snapshot_id` emitido pelo broker e query bounded | refs que atendem papel/nome/estado/ação; ambiguidade permanece explícita | snapshot válido por 30 s; nova captura antes de agir | segura sobre snapshot, não autoriza efeito |
+| `desktop.wait_for` | read | backend nativo, query bounded e, quando presente, `app_pid` observado | ref observada em nova captura ou `unknown` com timeout | polling bounded de até 30 s; cancelamento do run; pode restringir ao processo-alvo | nova observação, nunca retry de efeito |
+| `desktop.act` | write/unknown | `snapshot_id` emitido pelo broker, ref ainda válida e approval | dispatch separado da pós-condição; `verified:false` até reobservar | snapshot é consumido; backend nativo sem sucesso implícito | somente após reconciliação |
 | `clipboard.read` | read | backend do SO disponível; nenhuma coleta contínua | texto limitado, MIME `text/plain`, backend e observação retornados | comando nativo bounded a 2 s; cancelamento do run | segura, nova leitura sob demanda |
 | `clipboard.write` | write | texto bounded; approval hash-bound; backend do SO disponível | bytes escritos e backend retornados como `applied` somente após o processo terminar | comando nativo bounded a 2 s; cancelamento do run | não repetir sem decisão se o backend terminar em estado desconhecido |
 | `files.read` | read | path dentro da raiz permitida | bytes/encoding/tamanho conferidos | limite de saída | segura |
@@ -25,6 +25,11 @@ decisão do usuário; nunca há retry cego.
 | `apps.resolve` | read | nome curto e bounded | caminho de executável presente no catálogo local; nenhum processo iniciado | consulta ao PATH; cancelamento não produz efeito | segura, nova consulta |
 | `apps.launch` | external | programa/argv resolvidos; approval | spawn observado; janela ainda não é prova | processo separado | reconciliar antes de relançar |
 | `paths.open` | external | path dentro da raiz; approval | launcher aceitou o caminho; app útil ainda pendente | launcher do SO | não repetir sem observar |
+
+As raízes de arquivos são escolhidas pelo usuário em **Preferências → Pastas
+permitidas**, uma por linha. O broker só recebe raízes canônicas existentes;
+alterar a lista aguarda o término do run atual antes de valer para uma nova
+tarefa.
 
 ## Registro de efeito
 

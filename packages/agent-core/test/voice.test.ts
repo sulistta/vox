@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { VoiceController, type Transcriber } from "../src/voice.js";
+import { UnavailableTranscriber, VoiceController, type Transcriber } from "../src/voice.js";
 
 const transcriber: Transcriber = {
   async transcribe(audio) {
@@ -34,6 +34,16 @@ test("empty audio and transcription failure never create a turn", async () => {
   const result = await failing.stop(new Uint8Array([1]));
   assert.equal(result.errorCode, "PERMISSION_DENIED");
   assert.equal(failing.accept(), undefined);
+});
+
+test("an unavailable transcription engine cannot create a voice turn", async () => {
+  const voice = new VoiceController(new UnavailableTranscriber("STT local não está configurado"));
+  voice.start();
+  const result = await voice.stop(new Uint8Array([1, 2]));
+  assert.equal(result.state, "failed");
+  assert.equal(result.errorCode, "TRANSCRIPTION_UNAVAILABLE");
+  assert.equal(result.error, "STT local não está configurado");
+  assert.equal(voice.acceptTurn(), undefined);
 });
 
 test("cancelled capture is terminal and does not leak a transcript", () => {

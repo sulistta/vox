@@ -68,6 +68,42 @@ pub enum CaptureError {
     Io(String),
 }
 
+/// A native program that can provide bounded PCM audio to `AudioCapture`.
+///
+/// Detecting a backend only inspects the executable search path. It never
+/// opens a microphone or requests a permission, so callers can use it to
+/// explain availability in their UI before an explicit push-to-talk action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureBackend {
+    PipeWire,
+    Alsa,
+}
+
+impl CaptureBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PipeWire => "PipeWire",
+            Self::Alsa => "ALSA",
+        }
+    }
+}
+
+/// Return the preferred platform capture backend without starting it.
+pub fn native_capture_backend() -> Result<CaptureBackend, CaptureError> {
+    #[cfg(target_os = "linux")]
+    {
+        if executable_available("pw-record") {
+            return Ok(CaptureBackend::PipeWire);
+        }
+        if executable_available("arecord") {
+            return Ok(CaptureBackend::Alsa);
+        }
+    }
+    Err(CaptureError::BackendUnavailable(
+        "no supported native capture backend was found".into(),
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopReason {
     User,
@@ -320,33 +356,29 @@ fn resolve_command(config: &CaptureConfig) -> Result<(String, Vec<String>), Capt
         };
         return Ok((command.to_string_lossy().into_owned(), arguments));
     }
-    #[cfg(target_os = "linux")]
-    {
-        if executable_available("pw-record") {
-            return Ok((
-                "pw-record".into(),
-                vec![
-                    "--media-type".into(),
-                    "Audio".into(),
-                    "--media-category".into(),
-                    "Capture".into(),
-                    "--rate".into(),
-                    config.sample_rate.to_string(),
-                    "--channels".into(),
-                    config.channels.to_string(),
-                    "--format".into(),
-                    "s16".into(),
-                    "-".into(),
-                ],
-            ));
-        }
-        if executable_available("arecord") {
-            return Ok(("arecord".into(), raw_pcm_arguments(config)));
-        }
+    Ok(command_for_backend(native_capture_backend()?, config))
+}
+
+fn command_for_backend(backend: CaptureBackend, config: &CaptureConfig) -> (String, Vec<String>) {
+    match backend {
+        CaptureBackend::PipeWire => (
+            "pw-record".into(),
+            vec![
+                "--media-type".into(),
+                "Audio".into(),
+                "--media-category".into(),
+                "Capture".into(),
+                "--rate".into(),
+                config.sample_rate.to_string(),
+                "--channels".into(),
+                config.channels.to_string(),
+                "--format".into(),
+                "s16".into(),
+                "-".into(),
+            ],
+        ),
+        CaptureBackend::Alsa => ("arecord".into(), raw_pcm_arguments(config)),
     }
-    Err(CaptureError::BackendUnavailable(
-        "no supported native capture backend was found".into(),
-    ))
 }
 
 fn raw_pcm_arguments(config: &CaptureConfig) -> Vec<String> {
@@ -556,5 +588,22 @@ mod tests {
     #[test]
     fn peak_level_uses_signed_little_endian_samples() {
         assert_eq!(peak_s16(&[0, 0, 0xff, 0x7f, 0, 0x80]), 32768);
+    }
+
+    #[test]
+    fn backend_metadata_and_commands_are_safe_to_show_before_capture() {
+        let config = CaptureConfig::default();
+        let (pipewire, pipewire_arguments) = command_for_backend(CaptureBackend::PipeWire, &config);
+        assert_eq!(CaptureBackend::PipeWire.label(), "PipeWire");
+        assert_eq!(pipewire, "pw-record");
+        assert_eq!(pipewire_arguments.last().map(String::as_str), Some("-"));
+        assert!(pipewire_arguments
+            .iter()
+            .any(|argument| argument == "--rate"));
+
+        let (alsa, alsa_arguments) = command_for_backend(CaptureBackend::Alsa, &config);
+        assert_eq!(CaptureBackend::Alsa.label(), "ALSA");
+        assert_eq!(alsa, "arecord");
+        assert_eq!(alsa_arguments.last().map(String::as_str), Some("-"));
     }
 }

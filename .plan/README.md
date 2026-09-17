@@ -4,7 +4,7 @@ Data: 16/09/2026. Nome de trabalho: Vox, inferido do diretório; marca final pen
 
 ## Estado atual
 
-A T001 foi concluída com o alinhamento de produto e seu registro em [T001-alinhamento-produto.md](T001-alinhamento-produto.md). A primeira fatia executável agora existe: workspace Rust/TypeScript, core privado, IPC, broker/política, runtime de arquivos, SQLite, adapter xa11y e janela egui. A evidência e os limites desta execução estão no [registro de execução de 16/09/2026](EXECUCAO-2026-09-16.md). O contexto original do usuário continua sendo a autoridade de produto; código local não substitui provas multiplataforma ou de instalação.
+A T001 foi concluída com o alinhamento de produto e seu registro em [T001-alinhamento-produto.md](T001-alinhamento-produto.md). A primeira fatia executável agora existe: workspace Rust/TypeScript, core privado, IPC, broker/política, runtime de arquivos, SQLite, adapter xa11y e janela egui. A evidência e os limites estão nos [registros de 16/09](EXECUCAO-2026-09-16.md) e [17/09/2026](EXECUCAO-2026-09-17.md), além da [auditoria de prontidão](PRONTIDAO-2026-09-17.md). O contexto original do usuário continua sendo a autoridade de produto; código local não substitui provas multiplataforma ou de instalação.
 
 ## Guia de leitura
 
@@ -24,14 +24,15 @@ A T001 foi concluída com o alinhamento de produto e seu registro em [T001-alinh
 
 ## Revisão de detalhamento
 
-O plano contém 82 tarefas principais; T001 e as tarefas marcadas como concluídas no backlog têm evidência local. As demais foram executadas até onde o ambiente permite, com estado parcial ou bloqueado registrado no [registro de execução](EXECUCAO-2026-09-16.md). T065–T082 detalham interface e integração técnica e estão vinculadas aos gates; não formam uma fase posterior à v1. A interface obrigatória é uma **janela flutuante nativa, minimalista e moderna**, com modos de invocação, conversa e acompanhamento compacto. Leia os documentos 10 e 11 antes de ampliar a UI.
+O plano contém 82 tarefas principais; T001 e as tarefas marcadas como concluídas no backlog têm evidência local. As demais foram executadas até onde o ambiente permite, com estado parcial ou bloqueado registrado nos [registros de execução](EXECUCAO-2026-09-16.md) e [17/09](EXECUCAO-2026-09-17.md). T065–T082 detalham interface e integração técnica e estão vinculadas aos gates; não formam uma fase posterior à v1. A interface obrigatória é uma **janela flutuante nativa, minimalista e moderna**, com modos de invocação, conversa e acompanhamento compacto. Leia os documentos 10 e 11 antes de ampliar a UI.
 
 ## Como reproduzir e continuar
 
 Para reproduzir a fatia já executada, use `pnpm typecheck`, `pnpm test`,
-`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo test --workspace` e `cargo build -p vox-desktop`. O smoke,
-as limitações e as tarefas externas estão no [registro de execução](EXECUCAO-2026-09-16.md).
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+--all-features -- -D warnings`, `cargo test --workspace` e `cargo build -p
+vox-desktop`. O smoke, as limitações e as tarefas externas estão nos [registros
+de execução](EXECUCAO-2026-09-16.md) e [17/09](EXECUCAO-2026-09-17.md).
 
 O próximo trabalho não deve recomeçar T001: deve executar os itens marcados
 como parciais/externos no registro, começando pelo gate multiplataforma, pela

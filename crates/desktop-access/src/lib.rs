@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
@@ -34,24 +36,28 @@ pub fn list_native_windows() -> Result<Vec<NativeWindow>, String> {
     let mut windows = Vec::new();
     for app in apps {
         let app_name = app.name.clone();
+        let display_app_name = bounded_display_text(&app_name, MAX_DISPLAY_TEXT_CHARS);
         let app_pid = app.pid;
+        let app_id = native_app_id(&app_name, app_pid, app.data.handle);
         let app_is_window = matches!(app.data.role, xa11y::Role::Window | xa11y::Role::Dialog);
         let app_windows = if app_is_window {
             Vec::new()
         } else {
-            app.children().map_err(|error| {
-                format!("xa11y window enumeration failed for {app_name}: {error}")
-            })?
+            // Chromium/Electron applications can expose an application but
+            // refuse a renderer accessibility tree until it is launched with
+            // a separate accessibility flag. One such application must not
+            // hide every other desktop window from the user or the broker.
+            match app.children() {
+                Ok(children) => children,
+                Err(_) => continue,
+            }
         };
         for window in app_windows
             .into_iter()
             .filter(|window| matches!(window.role, xa11y::Role::Window | xa11y::Role::Dialog))
         {
             let data = window.data();
-            let window_id = data
-                .stable_id
-                .clone()
-                .unwrap_or_else(|| format!("xa11y-handle:{}", data.handle));
+            let window_id = native_window_ref(&app_id, data);
             let mut states = Vec::new();
             if data.states.enabled {
                 states.push("enabled".into());
@@ -66,10 +72,13 @@ pub fn list_native_windows() -> Result<Vec<NativeWindow>, String> {
                 states.push("focused".into());
             }
             windows.push(NativeWindow {
-                app_name: app_name.clone(),
+                app_name: display_app_name.clone(),
                 app_pid,
                 window_id,
-                name: data.name.clone().unwrap_or_default(),
+                name: bounded_display_text(
+                    data.name.as_deref().unwrap_or_default(),
+                    MAX_DISPLAY_TEXT_CHARS,
+                ),
                 role: data.role.to_snake_case().into(),
                 states,
                 bounds: data
@@ -79,15 +88,15 @@ pub fn list_native_windows() -> Result<Vec<NativeWindow>, String> {
         }
         if app_is_window {
             let data = &app.data;
-            let window_id = data
-                .stable_id
-                .clone()
-                .unwrap_or_else(|| format!("xa11y-handle:{}", data.handle));
+            let window_id = native_window_ref(&app_id, data);
             windows.push(NativeWindow {
-                app_name,
+                app_name: display_app_name,
                 app_pid,
                 window_id,
-                name: data.name.clone().unwrap_or_default(),
+                name: bounded_display_text(
+                    data.name.as_deref().unwrap_or_default(),
+                    MAX_DISPLAY_TEXT_CHARS,
+                ),
                 role: data.role.to_snake_case().into(),
                 states: Vec::new(),
                 bounds: data
@@ -124,43 +133,99 @@ pub struct NativeDesktop {
 
 impl NativeDesktop {
     pub fn snapshots(&self) -> Result<Vec<SemanticSnapshot>, String> {
+        self.snapshots_for_app_pid(None)
+    }
+
+    /// Observe either the full desktop or one process selected from the
+    /// broker-owned window list. Targeting a process avoids walking unrelated
+    /// accessibility trees after the agent has identified its intended app.
+    pub fn snapshots_for_app_pid(
+        &self,
+        app_pid: Option<u32>,
+    ) -> Result<Vec<SemanticSnapshot>, String> {
         use xa11y::{App, AppExt, Role};
 
         let apps = App::list().map_err(|error| format!("xa11y app enumeration failed: {error}"))?;
         let mut snapshots = Vec::new();
+        let mut inaccessible_apps = Vec::new();
         for app in apps {
-            let app_id = app
-                .pid
-                .map(|pid| format!("{}:{pid}", app.name))
-                .unwrap_or_else(|| app.name.clone());
+            if app_pid.is_some_and(|pid| app.pid != Some(pid)) {
+                continue;
+            }
+            let app_id = native_app_id(&app.name, app.pid, app.data.handle);
             let windows = if matches!(app.data.role, Role::Window | Role::Dialog) {
                 Vec::new()
             } else {
-                app.children()
-                    .map_err(|error| format!("xa11y children failed for {}: {error}", app.name))?
-                    .into_iter()
-                    .filter(|element| matches!(element.role, Role::Window | Role::Dialog))
-                    .collect()
+                match app.children() {
+                    Ok(children) => children
+                        .into_iter()
+                        .filter(|element| matches!(element.role, Role::Window | Role::Dialog))
+                        .collect(),
+                    Err(_) => {
+                        inaccessible_apps
+                            .push(bounded_display_text(&app.name, MAX_DISPLAY_TEXT_CHARS));
+                        continue;
+                    }
+                }
             };
             if windows.is_empty() && matches!(app.data.role, Role::Window | Role::Dialog) {
                 snapshots.push(self.snapshot_for_data(&app_id, &app.data));
             } else {
                 for window in windows {
-                    snapshots.push(self.snapshot_for_element(&app_id, &window)?);
+                    match self.snapshot_for_element(&app_id, &window) {
+                        Ok(snapshot) => snapshots.push(snapshot),
+                        Err(_) => inaccessible_apps
+                            .push(bounded_display_text(&app.name, MAX_DISPLAY_TEXT_CHARS)),
+                    }
                 }
             }
+        }
+        if snapshots.is_empty() && !inaccessible_apps.is_empty() {
+            let inaccessible = inaccessible_apps
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "xa11y could not read an accessibility tree for: {inaccessible}"
+            ));
         }
         Ok(snapshots)
     }
 
     pub fn wait_for(&self, query: &SemanticQuery, timeout: Duration) -> Result<QueryPage, String> {
+        self.wait_for_with_cancel_for_app_pid(query, timeout, &AtomicBool::new(false), None)
+    }
+
+    pub fn wait_for_with_cancel(
+        &self,
+        query: &SemanticQuery,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<QueryPage, String> {
+        self.wait_for_with_cancel_for_app_pid(query, timeout, cancel, None)
+    }
+
+    pub fn wait_for_with_cancel_for_app_pid(
+        &self,
+        query: &SemanticQuery,
+        timeout: Duration,
+        cancel: &AtomicBool,
+        app_pid: Option<u32>,
+    ) -> Result<QueryPage, String> {
         let deadline = Instant::now() + timeout;
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("accessibility wait cancelled".into());
+            }
             let mut page = QueryPage {
                 element_refs: Vec::new(),
                 truncated: false,
             };
-            for snapshot in self.snapshots()? {
+            for snapshot in self.snapshots_for_app_pid(app_pid)? {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("accessibility wait cancelled".into());
+                }
                 let current = query_snapshot(&snapshot, query);
                 page.truncated |= current.truncated;
                 page.element_refs.extend(current.element_refs);
@@ -171,7 +236,8 @@ impl NativeDesktop {
             if Instant::now() >= deadline {
                 return Ok(page);
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
         }
     }
 
@@ -181,7 +247,7 @@ impl NativeDesktop {
         element: &xa11y::Element,
     ) -> Result<SemanticSnapshot, String> {
         let data = element.data();
-        let window_id = native_element_ref(data);
+        let window_id = native_window_ref(app_id, data);
         let mut nodes = Vec::new();
         let mut truncated = false;
         append_native_node(element, None, 0, self.limits, &mut nodes, &mut truncated)?;
@@ -189,11 +255,13 @@ impl NativeDesktop {
     }
 
     fn snapshot_for_data(&self, app_id: &str, data: &xa11y::ElementData) -> SemanticSnapshot {
+        let mut truncated = false;
+        let node = semantic_node(data, None, &mut truncated);
         self.finish_snapshot(
             app_id,
-            native_element_ref(data),
-            vec![semantic_node(data, None)],
-            false,
+            native_window_ref(app_id, data),
+            vec![node],
+            truncated,
         )
     }
 
@@ -247,8 +315,24 @@ impl NativeDesktop {
                 "action {action} was not available in the supplied snapshot"
             ));
         }
+        let sensitive = is_sensitive_semantic_node(before);
+        if sensitive && matches!(action, "set_value" | "set-value") {
+            return Err("editing a sensitive accessibility field is not supported".into());
+        }
         let element = resolve_native_element(&snapshot.app_id, &snapshot.window_id, element_ref)?
             .ok_or_else(|| "element reference is stale or not found".to_string())?;
+        // A node can change between the broker-owned snapshot and this native
+        // resolution. Recheck the live label before writing so a recycled
+        // stable reference cannot turn an ordinary input into a credential
+        // field during that gap.
+        if matches!(action, "set_value" | "set-value")
+            && is_sensitive_accessibility_field(
+                element.data().name.as_deref().unwrap_or_default(),
+                &[],
+            )
+        {
+            return Err("editing a sensitive accessibility field is not supported".into());
+        }
         if !element
             .data()
             .actions
@@ -272,9 +356,9 @@ impl NativeDesktop {
             .snapshots()
             .ok()
             .and_then(|snapshots| {
-                snapshots
-                    .into_iter()
-                    .find(|candidate| candidate.window_id == snapshot.window_id)
+                snapshots.into_iter().find(|candidate| {
+                    candidate.app_id == snapshot.app_id && candidate.window_id == snapshot.window_id
+                })
             })
             .and_then(|fresh| {
                 fresh
@@ -282,9 +366,6 @@ impl NativeDesktop {
                     .into_iter()
                     .find(|node| node.element_ref == element_ref)
             });
-        let sensitive = before.states.iter().any(|state| state == "password")
-            || before.name.to_lowercase().contains("secret")
-            || before.name.to_lowercase().contains("password");
         let verified = match (action, after.as_ref()) {
             ("focus", Some(after)) => after.states.iter().any(|state| state == "focused"),
             ("toggle", Some(after)) => {
@@ -319,21 +400,22 @@ fn resolve_native_element(
 
     let apps = App::list().map_err(|error| format!("xa11y app enumeration failed: {error}"))?;
     for app in apps {
-        let current_app_id = app
-            .pid
-            .map(|pid| format!("{}:{pid}", app.name))
-            .unwrap_or_else(|| app.name.clone());
+        let current_app_id = native_app_id(&app.name, app.pid, app.data.handle);
         if current_app_id != app_id {
             continue;
         }
         if matches!(app.data.role, Role::Window | Role::Dialog) {
             continue;
         }
-        let roots = app
-            .children()
-            .map_err(|error| format!("xa11y children failed for {}: {error}", app.name))?;
+        let roots = match app.children() {
+            Ok(roots) => roots,
+            // An inaccessible unrelated window should not turn a stale
+            // reference into an arbitrary target. Treat it as unavailable and
+            // keep looking only within the matching app identity.
+            Err(_) => continue,
+        };
         for root in roots {
-            if native_element_ref(root.data()) != window_id {
+            if native_window_ref(&current_app_id, root.data()) != window_id {
                 continue;
             }
             if let Some(element) = find_native_element(&root, element_ref, 0, 8)? {
@@ -356,9 +438,10 @@ fn find_native_element(
     if depth >= max_depth {
         return Ok(None);
     }
-    let children = element
-        .children()
-        .map_err(|error| format!("xa11y tree traversal failed: {error}"))?;
+    let children = match element.children() {
+        Ok(children) => children,
+        Err(_) => return Ok(None),
+    };
     for child in children {
         if let Some(found) = find_native_element(&child, element_ref, depth + 1, max_depth)? {
             return Ok(Some(found));
@@ -374,16 +457,70 @@ fn unix_millis() -> u128 {
         .as_millis()
 }
 
-fn native_element_ref(data: &xa11y::ElementData) -> String {
-    data.stable_id
-        .clone()
-        .unwrap_or_else(|| format!("xa11y-handle:{}", data.handle))
+const MAX_DISPLAY_TEXT_CHARS: usize = 128;
+
+fn bounded_display_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let visible = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{visible}…")
+    } else {
+        visible
+    }
 }
 
-fn semantic_node(data: &xa11y::ElementData, parent_ref: Option<String>) -> SemanticNode {
+fn opaque_identifier(namespace: &str, value: &str) -> String {
+    // Never serialize a backend stable id directly: some accessibility
+    // bridges put user-visible strings in it. A truncated SHA-256 digest is
+    // sufficient for an in-process, broker-owned reference and is recomputed
+    // from the current native element during revalidation.
+    let digest = Sha256::digest(value.as_bytes());
+    let suffix = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{namespace}:{suffix}")
+}
+
+fn native_app_id(name: &str, pid: Option<u32>, handle: u64) -> String {
+    let name = opaque_identifier("xa11y-app", name);
+    pid.map(|pid| format!("{name}:{pid}"))
+        .unwrap_or_else(|| format!("{name}:handle-{handle}"))
+}
+
+fn native_element_ref(data: &xa11y::ElementData) -> String {
+    native_element_ref_for_identity(data.stable_id.as_deref(), data.handle)
+}
+
+fn native_element_ref_for_identity(stable_id: Option<&str>, handle: u64) -> String {
+    // xa11y exposes `stable_id` specifically for cross-snapshot correlation
+    // (a D-Bus object path on Linux). Provider handles are transient, so they
+    // are a fallback only when no stable platform identity is available.
+    let identity = stable_id
+        .map(|id| format!("stable\u{1f}{id}"))
+        .unwrap_or_else(|| format!("handle\u{1f}{handle}"));
+    opaque_identifier("xa11y-ref", &identity)
+}
+
+fn native_window_ref(app_id: &str, data: &xa11y::ElementData) -> String {
+    // Some platform adapters use a generic stable id for each app's window
+    // root. The app identity makes that root unique without feeding a
+    // transient handle into later revalidation.
     let element_ref = native_element_ref(data);
-    let lower_name = data.name.as_deref().unwrap_or_default().to_lowercase();
-    let sensitive = lower_name.contains("password") || lower_name.contains("secret");
+    opaque_identifier("xa11y-window", &format!("{app_id}\u{1f}{element_ref}"))
+}
+
+fn semantic_node(
+    data: &xa11y::ElementData,
+    parent_ref: Option<String>,
+    truncated: &mut bool,
+) -> SemanticNode {
+    let element_ref = native_element_ref(data);
+    let raw_name = data.name.as_deref().unwrap_or_default();
+    let name = bounded_display_text(raw_name, MAX_DISPLAY_TEXT_CHARS);
+    if name != raw_name {
+        *truncated = true;
+    }
     let mut states = Vec::new();
     if data.states.enabled {
         states.push("enabled".into());
@@ -397,22 +534,44 @@ fn semantic_node(data: &xa11y::ElementData, parent_ref: Option<String>) -> Seman
     if data.states.active {
         states.push("active".into());
     }
+    let sensitive = is_sensitive_accessibility_field(raw_name, &states);
+    let value = if sensitive {
+        data.value.as_ref().map(|_| "[REDACTED]".into())
+    } else {
+        data.value.as_deref().map(|value| {
+            let bounded = bounded_display_text(value, MAX_DISPLAY_TEXT_CHARS);
+            if bounded != value {
+                *truncated = true;
+            }
+            bounded
+        })
+    };
     SemanticNode {
         element_ref,
         parent_ref,
         role: data.role.to_snake_case().into(),
-        name: data.name.clone().unwrap_or_default(),
-        value: if sensitive {
-            data.value.as_ref().map(|_| "[REDACTED]".into())
-        } else {
-            data.value.clone()
-        },
+        name,
+        value,
         states,
-        actions: data.actions.clone(),
+        actions: supported_actions(&data.actions),
         bounds: data
             .bounds
             .map(|rect| [rect.x, rect.y, rect.width as i32, rect.height as i32]),
     }
+}
+
+fn supported_actions(actions: &[String]) -> Vec<String> {
+    actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.as_str(),
+                "press" | "focus" | "toggle" | "set_value" | "set-value"
+            )
+        })
+        .take(8)
+        .cloned()
+        .collect()
 }
 
 fn append_native_node(
@@ -429,7 +588,7 @@ fn append_native_node(
     }
     let data = element.data();
     let element_ref = native_element_ref(data);
-    nodes.push(semantic_node(data, parent_ref));
+    nodes.push(semantic_node(data, parent_ref, truncated));
     if depth == limits.max_depth {
         if element
             .children()
@@ -440,9 +599,13 @@ fn append_native_node(
         }
         return Ok(());
     }
-    let children = element
-        .children()
-        .map_err(|error| format!("xa11y tree traversal failed: {error}"))?;
+    let children = match element.children() {
+        Ok(children) => children,
+        Err(_) => {
+            *truncated = true;
+            return Ok(());
+        }
+    };
     for child in children {
         append_native_node(
             &child,
@@ -469,6 +632,52 @@ pub struct SemanticNode {
     pub states: Vec<String>,
     pub actions: Vec<String>,
     pub bounds: Option<[i32; 4]>,
+}
+
+/// Returns whether a semantic field can plausibly hold a credential. The
+/// model never gets the value of such fields and may not set them; a person
+/// can still use the operating system's normal input path. Labels are checked
+/// as whole words so "tokenizer" does not accidentally become a secret field.
+///
+/// This deliberately covers the initial Portuguese UI as well as common
+/// English labels. It is conservative because exposing or writing a secret is
+/// worse than requiring manual entry for an ambiguously named text field.
+pub fn is_sensitive_accessibility_field(name: &str, states: &[String]) -> bool {
+    if states.iter().any(|state| {
+        let state = state.trim();
+        state.eq_ignore_ascii_case("password") || state.eq_ignore_ascii_case("sensitive")
+    }) {
+        return true;
+    }
+
+    name.to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| {
+            matches!(
+                word,
+                "password"
+                    | "passwd"
+                    | "passcode"
+                    | "passphrase"
+                    | "secret"
+                    | "senha"
+                    | "segredo"
+                    | "credential"
+                    | "credentials"
+                    | "credencial"
+                    | "credenciais"
+                    | "token"
+                    | "pin"
+                    | "key"
+                    | "chave"
+            )
+        })
+}
+
+/// Convenience form used by the native bridge and the broker so both enforce
+/// exactly the same credential boundary.
+pub fn is_sensitive_semantic_node(node: &SemanticNode) -> bool {
+    is_sensitive_accessibility_field(&node.name, &node.states)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -556,6 +765,8 @@ pub enum AccessError {
     NotFound,
     #[error("action is not available")]
     Unsupported,
+    #[error("editing a sensitive accessibility field is not supported")]
+    SensitiveField,
 }
 
 #[derive(Debug, Clone)]
@@ -725,6 +936,9 @@ impl MockDesktop {
         if !node.actions.iter().any(|available| available == action) {
             return Err(AccessError::Unsupported);
         }
+        if is_sensitive_semantic_node(node) && matches!(action, "set_value" | "set-value") {
+            return Err(AccessError::SensitiveField);
+        }
         match action {
             "toggle" => {
                 let current = self
@@ -757,13 +971,8 @@ impl MockDesktop {
                     serde_json::json!({"element_ref":element_ref,"action":action,"value":next,"verified":true}),
                 )
             }
-            "set-value" => {
+            "set_value" | "set-value" => {
                 let next = value.ok_or(AccessError::Unsupported)?;
-                if node.states.iter().any(|state| state == "password") {
-                    return Ok(
-                        serde_json::json!({"element_ref":element_ref,"action":action,"value":"[REDACTED]","verified":true}),
-                    );
-                }
                 self.values.insert(element_ref.into(), next.into());
                 if let Some(node) = self
                     .snapshot
@@ -788,6 +997,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_wait_honors_cancellation_before_touching_accessibility() {
+        let desktop = NativeDesktop::default();
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            desktop
+                .wait_for_with_cancel(
+                    &SemanticQuery::default(),
+                    Duration::from_secs(1),
+                    &cancelled,
+                )
+                .unwrap_err(),
+            "accessibility wait cancelled"
+        );
+    }
+
+    #[test]
+    fn accessibility_text_and_identifiers_are_bounded_and_opaque() {
+        let input = "x".repeat(MAX_DISPLAY_TEXT_CHARS + 1);
+        let display = bounded_display_text(&input, MAX_DISPLAY_TEXT_CHARS);
+        assert_eq!(display.chars().count(), MAX_DISPLAY_TEXT_CHARS + 1);
+        assert!(display.ends_with('…'));
+
+        let identity = opaque_identifier("test", &input);
+        assert_eq!(identity, opaque_identifier("test", &input));
+        assert!(!identity.contains(&input));
+        assert_eq!(identity.len(), "test:".len() + 32);
+
+        let first_element = native_element_ref_for_identity(Some("element-path"), 41);
+        let repeated_element = native_element_ref_for_identity(Some("element-path"), 42);
+        let different_element = native_element_ref_for_identity(Some("other-path"), 41);
+        assert_eq!(first_element, repeated_element);
+        assert_ne!(first_element, different_element);
+        assert!(!first_element.contains("element-path"));
+        assert!(first_element.starts_with("xa11y-ref:"));
+
+        let first_window = opaque_identifier("xa11y-window", "app-a\u{1f}element-path");
+        let second_window = opaque_identifier("xa11y-window", "app-b\u{1f}element-path");
+        assert_ne!(first_window, second_window);
+    }
+
+    #[test]
     fn ambiguous_query_never_selects_first() {
         assert_eq!(
             MockDesktop::fixture().query(Some("button"), Some("Safe action")),
@@ -796,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_reference_and_secret_redaction_are_explicit() {
+    fn stale_reference_and_sensitive_field_blocking_are_explicit() {
         let mut desktop = MockDesktop::fixture();
         let snapshot = desktop.snapshot();
         assert_eq!(
@@ -809,16 +1059,38 @@ mod tests {
             ),
             Err(AccessError::StaleElement)
         );
-        let secret = desktop
-            .act(
+        assert_eq!(
+            desktop.act(
                 &snapshot.snapshot_id,
                 snapshot.generation,
                 "node-secret",
                 "set-value",
                 Some("secret"),
-            )
-            .unwrap();
-        assert_eq!(secret["value"], "[REDACTED]");
+            ),
+            Err(AccessError::SensitiveField)
+        );
+    }
+
+    #[test]
+    fn sensitive_labels_cover_portuguese_credentials_without_false_substring_matches() {
+        for label in [
+            "Senha do provedor",
+            "Token de acesso",
+            "Credenciais",
+            "Chave de API",
+            "PIN",
+        ] {
+            assert!(
+                is_sensitive_accessibility_field(label, &[]),
+                "{label:?} should be treated as sensitive"
+            );
+        }
+        assert!(is_sensitive_accessibility_field(
+            "Campo genérico",
+            &["password".into()]
+        ));
+        assert!(!is_sensitive_accessibility_field("Tokenizador", &[]));
+        assert!(!is_sensitive_accessibility_field("Chaveamento", &[]));
     }
 
     #[test]

@@ -35,7 +35,7 @@ Entregáveis T077: schemas/fixtures para eventos atrasados, duplicados, fora de 
 
 ## 3. Storage e migrações
 
-Tabelas propostas: sessions(id,title,created_at,updated_at); messages(id,session_id,role,content,seq); runs(id,session_id,state,model_ref,started_at,finished_at); tool_calls(id,run_id,name,args_redacted,state,effect,verification); approvals(id,run_id,tool_call_id,args_hash,scope,expires_at,state); preferences(key,value,schema_version); migrations(version,applied_at). Definir índices, foreign keys e política de retenção em T078, não guardar blobs ilimitados nos eventos.
+Tabelas propostas: sessions(id,title,created_at,updated_at); messages(id,session_id,role,content,seq); runs(id,session_id,state,model_ref,started_at,finished_at); tool_calls(id,run_id,name,args_redacted,state,effect,verification); approvals(id,run_id,tool_call_id,args_hash,scope,expires_at,state); preferences(key,value,schema_version); session_drafts(session_id,content,updated_at); migrations(version,applied_at). `session_drafts` usa foreign key com cascade, recebe conteúdo já redigido e fica fora da exportação. Definir índices, foreign keys e política de retenção em T078, não guardar blobs ilimitados nos eventos.
 
 Separar mensagem parcial em streaming de mensagem final confirmada; checkpoint limitado para não escrever a cada token. Journal registra intenção antes do efeito e resultado depois; transação do DB não torna efeito de GUI atômico. Após crash, reconciliar unknown por observação ou usuário. Exportação deve preservar ordem e indicar truncamento/redaction. Testar migração N−1→N, backup e falha no meio da migração.
 

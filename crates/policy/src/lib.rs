@@ -195,6 +195,7 @@ impl PolicyEngine {
         &self,
         tool: &str,
         args: &serde_json::Value,
+        scope: &str,
         approval_id: Option<&str>,
     ) -> Result<Decision, PolicyError> {
         let decision = self.decide(tool, args)?;
@@ -210,6 +211,12 @@ impl PolicyEngine {
             .get(&id)
             .cloned()
             .ok_or(PolicyError::InvalidApproval)?;
+        // An approval is intentionally scoped outside of the model-visible
+        // arguments.  In particular, an identical write in another run must
+        // never be able to consume an approval shown for this run.
+        if token.scope != scope {
+            return Err(PolicyError::InvalidApproval);
+        }
         self.authorize(tool, args, Some(&token))
     }
 
@@ -298,13 +305,41 @@ mod tests {
         let id = approval.approval_id.to_string();
         assert_eq!(
             policy
-                .authorize_ref("files.write", &args, Some(&id))
+                .authorize_ref("files.write", &args, "run:r", Some(&id))
                 .unwrap(),
             Decision::Allow
         );
         assert_eq!(
-            policy.authorize_ref("files.write", &args, Some(&id)),
+            policy.authorize_ref("files.write", &args, "run:r", Some(&id)),
             Err(PolicyError::InvalidApproval)
+        );
+    }
+
+    #[test]
+    fn approval_cannot_be_consumed_by_another_run() {
+        let policy = PolicyEngine::default();
+        let args = serde_json::json!({"path":"/tmp/a"});
+        let approval = policy
+            .issue_approval(
+                "files.write",
+                &args,
+                "run:original",
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let id = approval.approval_id.to_string();
+
+        assert_eq!(
+            policy.authorize_ref("files.write", &args, "run:other", Some(&id)),
+            Err(PolicyError::InvalidApproval)
+        );
+        // The rejected cross-run attempt must not consume the original
+        // approval.  The user can still approve the exact action they saw.
+        assert_eq!(
+            policy
+                .authorize_ref("files.write", &args, "run:original", Some(&id))
+                .unwrap(),
+            Decision::Allow
         );
     }
 

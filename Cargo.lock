@@ -3112,6 +3112,7 @@ dependencies = [
  "egui",
  "serde_json",
  "uuid",
+ "vox-audio-capture",
  "vox-broker",
  "vox-desktop-access",
  "vox-policy",
@@ -3127,6 +3128,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "uuid",
  "xa11y",

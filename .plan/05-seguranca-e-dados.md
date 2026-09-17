@@ -20,6 +20,14 @@ Autorização prévia válida evita perguntas repetidas. Aprovações expiram qu
 
 Caminhos: canonicalização, symlinks, traversal, limites de diretório e revalidação no momento do acesso; evitar TOCTOU com primitives adequadas. Escritas atômicas quando aplicável, colisões explícitas, backup/reversão limitada e trash em vez de remoção permanente. Acesso a áreas sensíveis bloqueado por padrão com escopo configurável.
 
+Snapshots de acessibilidade devem ser emitidos e guardados pelo broker,
+vinculados ao run, com TTL curto e consumo ao agir; o modelo recebe dados
+textuais e devolve apenas referências opacas. Preenchimento de campos de
+credencial fica fora do escopo, para que uma senha, segredo, token, PIN ou
+chave não atravesse o modelo ou seja despachada pela automação. A detecção usa
+estado semântico e palavras completas de rótulos em português/inglês, com
+revalidação do elemento nativo imediatamente antes da escrita.
+
 ## Dados
 
 Proposta A04: SQLite local para sessões, mensagens, runs, tool calls, aprovações e migrations; um proprietário de escrita. Esquemas versionados, timestamps UTC, timezone da sessão, transações e recuperação após encerramento abrupto. Conteúdo de ações em andamento é registrado antes do efeito; resultado registra evidência e incerteza.

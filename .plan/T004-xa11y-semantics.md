@@ -34,7 +34,7 @@ O comando `xa11y shell` retornou `No shell surfaces found`, portanto a superfíc
 
 | Cenário | Resultado atual | Limite comprovado |
 |---|---|---|
-| Fixture controlada | Ainda não criada | T004 permanece aberto; T079 criará uma fixture com nós duplicados, stale refs, modal, senha e lista virtualizada. |
+| Fixture controlada | GTK controlada passou no AT-SPI real Linux | Prova PID direcionado, nomes duplicados, senha e token em português redigidos/bloqueados, `press` sem pós-condição inventada, espera, nó recriado/ref stale, truncamento e diálogo. T004 permanece aberto para foco/troca de janela e demais plataformas. |
 | VS Code | `code`/`code-insiders` não encontrados no PATH | Não há observação nem ação real em VS Code nesta máquina. Não declarar J02/J06 aprovado. |
 | Discord | Processo Snap `Discord 1.0.158` existe, mas não apareceu em `xa11y apps` nem nas 24 janelas observadas | Login/árvore/acessibilidade não comprovados; não navegar nem inferir sucesso. |
 | Apps acessíveis já abertos | Enumeração funciona para Chrome/OpenCode/ChatGPT/Codex | Isso prova apenas a sessão AT-SPI parcial, não a matriz completa de apps alvo. |
@@ -43,5 +43,5 @@ O comando `xa11y shell` retornou `No shell surfaces found`, portanto a superfíc
 
 - Rust consegue integrar a crate sem modificar o código do xa11y: os testes do core passaram e o CLI foi compilado.
 - A abordagem de referência semântica é viável no Linux atual para alguns aplicativos.
-- O relatório ainda não mede fixture, threading/bloqueio de cada app, chamadas de ação reais, VS Code, Discord, permissões, KDE/Wayland, X11, Windows ou macOS.
-- A próxima prova segura é criar a fixture Vox e adaptar o cliente em worker; ações reais somente após revalidação de referência e política.
+- O relatório ainda não mede threading/bloqueio de cada app, VS Code, Discord, permissões, KDE/Wayland, X11, Windows ou macOS. A fixture cobre chamadas reais controladas, não os apps de aceite.
+- A próxima prova segura é injetar troca de foco/janela entre observação e ação na fixture e repetir os cenários em X11/KDE; ações nos apps de aceite continuam somente após revalidação de referência e política.

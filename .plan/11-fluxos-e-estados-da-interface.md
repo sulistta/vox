@@ -4,7 +4,7 @@ Complementa a [especificação visual](10-interface-janela-flutuante.md) e os [c
 
 ## 1. Separar janela, conversa e execução
 
-Estado da janela: hidden / invocation / conversation / compact / preferences / history. Estado de run: idle / thinking / executing / awaiting_approval / waiting_user / cancelling / completed / failed / cancelled. Estado de voz: idle / recording / transcribing / review / failed. Cada dimensão é independente, com invariantes explícitas; “janela escondida” não equivale a “run cancelado”.
+Estado atual da janela: invocation / conversation / compact / preferences / history. `hidden` só entra quando houver rota de reativação validada. Estado de run: idle / thinking / executing / awaiting_approval / waiting_user / cancelling / completed / failed / cancelled. Estado de voz: idle / recording / transcribing / review / failed. Cada dimensão é independente, com invariantes explícitas; uma futura “janela escondida” não equivale a “run cancelado”.
 
 Invariantes: apenas um run com efeitos; apenas uma captura; Parar alcançável durante efeitos; aprovação pendente bloqueia ferramentas; alterações visuais não despacham ações; replay do histórico não reexecuta ferramenta; receber evento não ativa janela sem gesto do usuário. Eventos repetidos são deduplicados por run_id/seq. Eventos de run anterior não alteram a faixa do run atual.
 
@@ -52,7 +52,7 @@ Clique Parar → UI muda imediatamente para “Interrompendo…” → bloquear 
 
 Se chamada do SO não permitir abort: “A ação atual ainda está terminando. Nenhuma nova ação será iniciada.” Quando houver certeza, atualizar resultado. Botão não afirma desfazer. Interromper não remove a conversa nem perde rascunho.
 
-Ocultar sem run: hidden. Ocultar durante run: compacto, salvo controle alternativo validado para ocultação total. Sair durante run: pedir encerramento ao supervisor e comunicar efeito incerto; se um worker precisar ser encerrado à força, somente processos próprios são alvos e o journal preserva incerteza.
+Enquanto o desktop não oferecer rota de reativação validada, Recolher sem run e durante run: acompanhamento compacto, com a janela ainda visível. Durante run, Expandir e Parar permanecem alcançáveis; depois de terminar, Expandir mostra a conversa e o resultado. Ocultar/minimizar a única janela por controle do Vox fica indisponível até tray, atalho global ou integração equivalente provar a reativação. Sair durante run: pedir encerramento ao supervisor e comunicar efeito incerto; se um worker precisar ser encerrado à força, somente processos próprios são alvos e o journal preserva incerteza.
 
 ## 7. Teclado e foco
 
@@ -66,7 +66,7 @@ Ocultar sem run: hidden. Ocultar durante run: compacto, salvo controle alternati
 | Esc | Captura/STT | Cancela voz sem executar |
 | Esc | Run ativo, sem overlay/voz | Solicita Parar |
 | Esc | Aprovação | Nega ação pendente, não a aprova |
-| Esc | Idle | Oculta janela e preserva rascunho |
+| Esc | Idle | Recolhe a janela e preserva rascunho; ocultação total depende de rota de reativação validada |
 | Tab/Shift+Tab | Janela | Percorre controles visíveis em ordem lógica |
 
 Prioridade de Esc: voz → menu/overlay → aprovação → run ativo → ocultar idle. Atalhos globais não recebem combinação fixa obrigatória antes de testar conflitos/portais; onboarding permite editar e indica disponibilidade. Preferências e Histórico têm Voltar, preservando posição/rascunho. Ao retornar por conclusão automática, não focar campo à força.
@@ -99,6 +99,6 @@ Histórico: lista por recência com título derivado de intenção, data local e
 
 ## 10. Casos de aceite da interface
 
-UI01 abrir/ocultar/reabrir conserva rascunho; UI02 streaming não rouba scroll; UI03 Enter IME não envia; UI04 compactar conserva run; UI05 Parar impede novos efeitos; UI06 aprovação não aceita Enter residual; UI07 monitor desconectado mantém janela acessível; UI08 texto 200% não corta decisão; UI09 voz cancelada não cria turno; UI10 troca de modelo durante run é bloqueada; UI11 evento antigo não substitui run atual; UI12 erro parcial mostra efeitos já ocorridos; UI13 leitor de tela identifica controles e não anuncia cada token; UI14 Ocultar durante run conserva acesso a Parar; UI15 crash/restart não reexecuta; UI16 renderer idle fica estável.
+UI01 abrir/recolher/expandir conserva rascunho; UI02 streaming não rouba scroll; UI03 Enter IME não envia; UI04 compactar conserva run; UI05 Parar impede novos efeitos; UI06 aprovação não aceita Enter residual; UI07 monitor desconectado mantém janela acessível; UI08 texto 200% não corta decisão; UI09 voz cancelada não cria turno; UI10 troca de modelo durante run é bloqueada; UI11 evento antigo não substitui run atual; UI12 erro parcial mostra efeitos já ocorridos; UI13 leitor de tela identifica controles e não anuncia cada token; UI14 Recolher durante run conserva a janela e acesso a Parar; UI15 crash/restart não reexecuta; UI16 renderer idle fica estável.
 
 Mapeamento: UI01–UI04/T068–T070; UI05–UI06/T072; UI07–UI08/T066+T074; UI09/T073; UI10/T071; UI11/T077; UI12/T072; UI13/T074; UI14/T069; UI15/T081; UI16/T076. Todos devem gerar evidência de teste, não apenas screenshot.

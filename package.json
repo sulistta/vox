@@ -14,7 +14,8 @@
     "package:dev": "./scripts/package-dev.sh",
     "package:linux": "./scripts/package-linux.sh",
     "bundle:validate": "./scripts/validate-bundle.sh",
-    "benchmark:core": "node scripts/benchmark-core.mjs"
+    "benchmark:core": "node scripts/benchmark-core.mjs",
+    "smoke:provider": "node scripts/provider-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

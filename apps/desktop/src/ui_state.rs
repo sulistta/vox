@@ -12,6 +12,24 @@ pub struct UiMessage {
     pub content: String,
 }
 
+/// A redacted transcript of a request sent to the configured language model.
+/// It is retained only in the live presentation state so the user can inspect
+/// the current run under “Ver atividade”; it is deliberately separate from
+/// chat history and never authorizes a desktop action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelActivityMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelActivityRound {
+    pub round: u64,
+    pub provider: String,
+    pub model_ref: Option<String>,
+    pub messages: Vec<ModelActivityMessage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationState {
     pub mode: WindowMode,
@@ -23,6 +41,7 @@ pub struct PresentationState {
     pub error: Option<String>,
     pub connected: bool,
     pub show_activity: bool,
+    pub model_activity: Vec<ModelActivityRound>,
     pub model_label: String,
     last_seq: u64,
     terminal: bool,
@@ -40,6 +59,7 @@ impl Default for PresentationState {
             error: None,
             connected: false,
             show_activity: false,
+            model_activity: Vec::new(),
             model_label: "Modelo de referência · Local".into(),
             last_seq: 0,
             terminal: false,
@@ -61,7 +81,28 @@ impl PresentationState {
         self.mode = WindowMode::Conversation;
         self.status = "pensando".into();
         self.error = None;
+        self.model_activity.clear();
+        self.show_activity = false;
         self.last_seq = 0;
+        self.terminal = false;
+    }
+
+    /// Undo the optimistic local bubble when the private core never accepted
+    /// the turn. The draft itself belongs to the composer and is intentionally
+    /// left intact so the person can retry without creating a duplicate.
+    pub fn withdraw_submission_for(&mut self, run_id: &str) {
+        if self.active_run.as_deref() != Some(run_id) {
+            return;
+        }
+        if self
+            .messages
+            .last()
+            .is_some_and(|message| message.role == "Você")
+        {
+            self.messages.pop();
+        }
+        self.active_run = None;
+        self.activity = None;
         self.terminal = false;
     }
 
@@ -146,11 +187,41 @@ impl PresentationState {
         }
     }
 
+    /// Records a transparency event only for the active run. A malformed or
+    /// stale core event cannot overwrite the user-visible activity of a newer
+    /// task. The protocol bounds rounds to 32; this cap is kept locally too.
+    pub fn record_model_activity_for(&mut self, run_id: &str, round: ModelActivityRound) {
+        if self.active_run.as_deref() != Some(run_id) {
+            return;
+        }
+        if let Some(existing) = self
+            .model_activity
+            .iter_mut()
+            .find(|existing| existing.round == round.round)
+        {
+            *existing = round;
+        } else {
+            self.model_activity.push(round);
+            self.model_activity.sort_by_key(|entry| entry.round);
+            if self.model_activity.len() > 32 {
+                self.model_activity.remove(0);
+            }
+        }
+    }
+
     pub fn toggle_compact(&mut self) {
         self.mode = match self.mode {
             WindowMode::Compact => WindowMode::Conversation,
             _ => WindowMode::Compact,
         };
+    }
+
+    /// Keep the only Vox window reachable. Until the desktop integration has
+    /// a verified way to reactivate a hidden window (such as a tray item or
+    /// global invocation), the visible control always enters the compact
+    /// accompaniment instead of minimizing the window.
+    pub fn request_compact_accompaniment(&mut self) {
+        self.mode = WindowMode::Compact;
     }
 }
 
@@ -176,6 +247,20 @@ mod tests {
         state.toggle_compact();
         assert_eq!(state.mode, WindowMode::Compact);
         assert_eq!(state.active_run.as_deref(), Some("run"));
+    }
+
+    #[test]
+    fn compact_accompaniment_keeps_the_only_window_reachable_for_idle_and_active_runs() {
+        let mut active = PresentationState::default();
+        active.submit("faça", "run");
+
+        active.request_compact_accompaniment();
+        assert_eq!(active.mode, WindowMode::Compact);
+        assert_eq!(active.active_run.as_deref(), Some("run"));
+
+        let mut idle = PresentationState::default();
+        idle.request_compact_accompaniment();
+        assert_eq!(idle.mode, WindowMode::Compact);
     }
 
     #[test]
@@ -232,5 +317,51 @@ mod tests {
         state.complete_for("run", "olá");
         assert_eq!(state.active_run, None);
         assert_eq!(state.status, "concluído");
+    }
+
+    #[test]
+    fn failed_dispatch_withdraws_only_the_optimistic_bubble_and_keeps_the_draft() {
+        let mut state = PresentationState {
+            draft: "tente novamente".into(),
+            ..Default::default()
+        };
+        state.submit("tente novamente", "run");
+
+        state.withdraw_submission_for("run");
+
+        assert!(state.messages.is_empty());
+        assert_eq!(state.draft, "tente novamente");
+        assert_eq!(state.active_run, None);
+    }
+
+    #[test]
+    fn model_activity_is_bound_to_the_active_run_and_survives_completion() {
+        let mut state = PresentationState::default();
+        state.submit("oi", "run-current");
+        state.record_model_activity_for(
+            "run-old",
+            ModelActivityRound {
+                round: 1,
+                provider: "fake".into(),
+                model_ref: None,
+                messages: vec![],
+            },
+        );
+        assert!(state.model_activity.is_empty());
+        state.record_model_activity_for(
+            "run-current",
+            ModelActivityRound {
+                round: 1,
+                provider: "fake".into(),
+                model_ref: Some("fake-text".into()),
+                messages: vec![ModelActivityMessage {
+                    role: "user".into(),
+                    content: "pedido redigido".into(),
+                }],
+            },
+        );
+        state.complete_for("run-current", "feito");
+        assert_eq!(state.model_activity.len(), 1);
+        assert!(!state.show_activity);
     }
 }

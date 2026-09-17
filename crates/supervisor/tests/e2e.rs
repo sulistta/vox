@@ -30,11 +30,12 @@ fn start_supervisor() -> AgentSupervisor {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("packages/agent-core/dist/main.js"));
     assert!(entry.exists(), "build the TypeScript core before E2E tests");
-    let supervisor = AgentSupervisor::spawn(
+    let supervisor = AgentSupervisor::spawn_with_env(
         std::env::var_os("VOX_NODE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("node")),
         entry,
+        &[("VOX_PROVIDER".into(), "fake-tools".into())],
     )
     .expect("spawn private core");
     supervisor.initialize().expect("initialize core");

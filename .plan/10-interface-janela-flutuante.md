@@ -17,13 +17,13 @@ Unidade: ponto lógico do toolkit, independente de pixels físicos. Conteúdo de
 
 | Modo | Tamanho inicial proposto | Conteúdo e uso |
 |---|---|---|
-| Invocação vazia | 440 × 176 pt | Cabeçalho discreto, “Como posso ajudar?”, compositor e identificação do modelo |
+| Invocação vazia | 440 × 280 pt | Cabeçalho discreto, “Como posso ajudar?”, compositor e identificação do modelo |
 | Conversa | 440 × 520 pt | Cabeçalho, histórico rolável, faixa de execução e compositor fixo |
 | Acompanhamento compacto | 360 × 88 pt | Ação atual, app alvo, Expandir e Parar; aparece por escolha do usuário |
 | Aprovação | Largura atual, altura até limite útil | Conversa e resumo concreto com botões; área de detalhes rolável |
 | Preferências/histórico | 560 × 560 pt quando houver espaço | Uma tela secundária por vez dentro da mesma janela, com Voltar |
 
-Largura normal ajustável entre 360 e 640 pt; altura útil máxima de 720 pt e sempre limitada à área de trabalho menos margem de 16 pt em cada borda. Em área útil menor, permitir largura até 320 pt; reduzir margens e rolar conteúdo, nunca cortar Parar ou botões de decisão. Escala de texto de 200% pode exigir janela maior/rolagem, sem texto sobre controles.
+Largura normal ajustável entre 360 e 640 pt; altura útil máxima de 720 pt e sempre limitada à área de trabalho menos margem de 16 pt em cada borda. Em área útil menor, permitir largura até 320 pt; reduzir margens e rolar conteúdo, nunca cortar Parar ou botões de decisão. Escala de texto de 200% pode exigir janela maior/rolagem, sem texto sobre controles. O protótipo egui foi ajustado de 176 para 280 pt após uma captura real mostrar o compositor cortado; a altura mínima normal é 260 pt e só o modo compacto reduz esse limite.
 
 Primeira abertura: centralizada horizontalmente no monitor ativo, em torno de 22% da altura útil a partir do topo, sem encostar em painel/dock. Depois preservar posição e tamanho escolhidos pelo usuário por monitor quando identificável. Se monitor sumir, reposicionar dentro da área útil do monitor atual. Não pressupor que Wayland permita posicionamento absoluto; quando não permitir, aceitar posicionamento do compositor e registrar capability.
 
@@ -35,9 +35,9 @@ Ordem vertical: cabeçalho → conversa → execução/aprovação, se existente
 
 ### Cabeçalho
 
-Altura-base 40 pt. À esquerda, nome “Vox” em 13 pt semibold, sem logo grande. À direita, menu Mais e Ocultar. Toda área livre do cabeçalho permite arrastar, preservando hitboxes dos botões. Arraste não é a única forma de mover: usar mecanismos nativos de janela e caminho por teclado disponíveis no SO.
+Altura-base 40 pt. À esquerda, nome “Vox” em 13 pt semibold, sem logo grande. À direita, menu Mais e **Recolher**. Toda área livre do cabeçalho permite arrastar, preservando hitboxes dos botões. Arraste não é a única forma de mover: usar mecanismos nativos de janela e caminho por teclado disponíveis no SO.
 
-Menu Mais: Nova conversa, Histórico, Preferências, Recolher/Expandir, Manter acima, Sair. Marcar estado de Manter acima e explicar quando indisponível. “Ocultar” esconde a janela, mantém app residente e não significa cancelar. “Sair” solicita interrupção de run ativo, mostra resultado incerto se existir, encerra captura e processos próprios.
+Menu Mais: Nova conversa, Histórico, Preferências, Manter acima e Sair. Marcar estado de Manter acima e explicar quando indisponível. **Recolher** reduz a própria janela para o acompanhamento compacto e mantém os controles Expandir e, durante um run, Parar visíveis. Enquanto não houver uma rota de reativação validada (tray, atalho global ou integração equivalente), a interface não oferece Ocultar/minimizar a única janela do Vox. “Sair” solicita interrupção de run ativo, mostra resultado incerto se existir, encerra captura e processos próprios.
 
 Decoração própria discreta é desejada, condicionada à viabilidade de arrastar/redimensionar, sombras, acessibilidade e menus do SO. Usar decoração nativa caso customização prejudique esses recursos. Não desenhar botões falsos imitando macOS no Windows/Linux.
 
@@ -111,7 +111,7 @@ Nem todo botão possui estado persistente de sucesso; mapear estado no component
 
 “Flutuante” não significa exigir always-on-top permanente. Ao invocar, trazer a janela à frente quando permitido. “Manter acima” é opt-in; não roubar foco periodicamente. Antes de ação em outro app, preservar identidade do alvo, permitir que ele receba foco e impedir que o próprio Vox seja escolhido como alvo implícito.
 
-Clique fora não envia, cancela ou descarta texto; por padrão a janela permanece visível sem foco. Usuário pode Ocultar ou Recolher. Quando há execução ativa, Ocultar converte primeiro para acompanhamento compacto, garantindo acesso a Parar. Ocultação total durante run só é permitida se outro controle de parada tiver sido validado no ambiente; caso contrário, manter compacto. Se captura estiver ativa, Ocultar interrompe captura e descarta áudio ainda não confirmado.
+Clique fora não envia, cancela ou descarta texto; por padrão a janela permanece visível sem foco. O controle disponível é **Recolher**: ele sempre converte para acompanhamento compacto e mantém a única janela alcançável, tanto ociosa quanto durante execução. Ocultação/minimização por controle do Vox só entra depois de existir rota de reativação validada no ambiente e, durante run, outro caminho de Parar igualmente validado. Se captura estiver ativa, uma futura ocultação total interrompe captura e descarta áudio ainda não confirmado.
 
 Modo compacto não aceita texto, não mostra histórico e não altera o run. Expandir recupera exatamente a conversa, rascunho e posição de leitura. Aprovação surgida nesse modo mostra “Preciso da sua confirmação” e Expandir; efeitos ficam suspensos. Não abrir janela por cima do usuário nem aprovar por atalho genérico.
 
@@ -122,8 +122,8 @@ Conclusão em modo compacto permanece como “Concluído · Ver resultado”, se
 Os blocos abaixo descrevem a distribuição funcional; não simulam chrome de navegador nem especificam pixels finais.
 
 ```text
-INVOCAÇÃO (440 × 176)
-Vox                                       Mais  Ocultar
+INVOCAÇÃO (440 × 280)
+Vox                                      Mais  Recolher
 Como posso ajudar?
 Mensagem
 [ Peça algo ao seu computador                         ]
@@ -133,7 +133,7 @@ Modelo de referência · Local
 
 ```text
 CONVERSA (440 × 520)
-Vox                                       Mais  Ocultar
+Vox                                      Mais  Recolher
                               Crie um projeto Rust...
 Vou criar os arquivos e executar os testes.
 [histórico rolável; espaço flexível]
@@ -147,8 +147,8 @@ Modelo de referência · Local
 
 ```text
 ACOMPANHAMENTO (360 × 88)
-Executando testes                            [Expandir]
-meu-projeto                                    [Parar]
+Executando testes                      [Expandir] [Parar]
+A janela continua visível; a tarefa segue sob seu controle.
 ```
 
 ```text

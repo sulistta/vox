@@ -130,7 +130,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T001.
 - **Trabalho e entrega:** Fixar versão; observar e acionar fixture, VS Code e Discord; medir árvores, threading, falhas e chamadas bloqueantes.
 - **Aceite:** Relatório por app com ações realmente disponíveis e limite conhecido; Rust integra sem modificar xa11y.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; evidência: [T004 — xa11y e semântica](T004-xa11y-semantics.md) e [T021–T025 — adapter nativo](T021-T025-dados-acessibilidade.md). Probe real Linux passou; VS Code/Discord/fixture acionável e três SOs não foram provados.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; evidência: [T004 — xa11y e semântica](T004-xa11y-semantics.md) e [T021–T025 — adapter nativo](T021-T025-dados-acessibilidade.md). Probe real Linux e fixture GTK acionável passaram; VS Code/Discord acionáveis e três SOs não foram provados.
 
 ### T005 — Provar Linux Wayland e X11
 
@@ -238,7 +238,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T013,T014.
 - **Trabalho e entrega:** Adaptar ferramentas reaproveitadas para chamar broker e remover caminhos diretos de efeitos.
 - **Aceite:** Auditoria e teste provam shell/arquivos/GUI passam pela mesma política; G1 atendido.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; ferramentas de arquivos, shell, processos, apps e GUI entram pelo broker, mas auditoria adversarial completa G1 segue em T050.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial; ferramentas de arquivos, shell, processos, apps e GUI entram pelo broker, mas a auditoria encontrou TOCTOU em caminhos de arquivo: a validação canônica atual pode ser invalidada por troca concorrente de symlink/diretório antes do efeito. G1 exige operações ancoradas em descritor de diretório e a suíte adversarial correspondente antes de ser declarado atendido.
 
 ### T017 — Integrar provider comercial textual
 
@@ -247,7 +247,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T013,T016.
 - **Trabalho e entrega:** Escolher provider de referência e implementar auth, streaming, chamadas estruturadas e erros.
 - **Aceite:** Turno com tool real funciona sem imagem; falhas de credencial, rate limit e timeout são legíveis.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; adapter OpenAI-compatible e SSE fake local passam, mas não foi usada credencial/conta comercial real.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; adapter OpenAI-compatible e SSE fake local passam, e um smoke controlado contra endpoint remoto OpenAI-compatible concluiu turno textual e cancelamento com atividade redigida; ferramentas ficaram bloqueadas. Avaliação de tool real, qualidade, custo, rate limit e latência p95 continuam abertos.
 
 ### T018 — Integrar provider local e endpoint customizado
 
@@ -283,7 +283,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T013,T020.
 - **Trabalho e entrega:** Criar DB versionado, transações, journal, migrações e recuperação de run interrupted.
 - **Aceite:** Reinício preserva mensagens confirmadas e não repete efeitos; corrupção recebe diagnóstico recuperável.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; evidência: [T021–T025 — dados e acessibilidade](T021-T025-dados-acessibilidade.md). SQLite v1→v3, recovery, diagnóstico de corrupção, retenção determinística, journal idempotente, lease global e backup online reaberto passam; migração interrompida do instalador e restauração operacional ainda não.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; evidência: [T021–T025 — dados e acessibilidade](T021-T025-dados-acessibilidade.md). SQLite v1→v4, recovery, diagnóstico de corrupção, retenção determinística, journal idempotente, lease global, backup online reaberto e rascunho redigido por sessão passam; migração interrompida do instalador e restauração operacional ainda não.
 
 ### T022 — Guardar segredos e controlar retenção
 
@@ -292,7 +292,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T017,T021.
 - **Trabalho e entrega:** Integrar keyring, redaction, exclusão/exportação e aviso de envio remoto.
 - **Aceite:** Segredo não aparece em logs/DB/exportação; keyring indisponível não gera arquivo plaintext implícito.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, adaptador `vox-secrets` com libsecret/Keychain/Windows Credential Manager/fixture e formulário básico de conta + campo mascarado passam no código Linux/fixture; o segredo só é injetado no ambiente do core privado e nunca no SQLite. Validação real nos dois outros SOs e validação remota continuam pendentes.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; redaction, exportação sem credenciais, aviso de provider configurado, retenção configurável com proteção da sessão atual, rascunho redigido excluído da exportação, adaptador `vox-secrets` com libsecret/Keychain/Windows Credential Manager/fixture e formulário básico de conta + campo mascarado passam no código Linux/fixture; o segredo só é injetado no ambiente do core privado e nunca no SQLite. O smoke remoto textual passou; validação real nos dois outros SOs, rate limit e uso diário continuam pendentes.
 
 ### T023 — Implementar parada ponta a ponta
 
@@ -310,7 +310,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T004,T010,T014.
 - **Trabalho e entrega:** Encapsular xa11y, tratar permissões, threading, ciclo de vida e capabilities por ambiente.
 - **Aceite:** Fixture é enumerada nos três SOs; falhas nativas não derrubam GUI.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; evidência: [T021–T025 — adapter nativo](T021-T025-dados-acessibilidade.md). xa11y 0.14.0 integrado e probe Linux real passa; fixture/Windows/macOS ainda abertos.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; evidência: [T021–T025 — adapter nativo](T021-T025-dados-acessibilidade.md). xa11y 0.14.0 integrado, probe Linux e fixture GTK real passam; Windows/macOS ainda abertos.
 
 ### T025 — Normalizar e limitar snapshots
 
@@ -328,7 +328,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T025.
 - **Trabalho e entrega:** Implementar busca por papel/nome/estado, escopo app/janela, listas virtualizadas e referências temporárias.
 - **Aceite:** Ambiguidade e stale refs geram erro recuperável; nenhum alvo arbitrário é selecionado.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; fixture e query semântica cobrem papel/nome/estado/ação, limite/paginação, ambiguidade e stale ref; escopo rico por app/janela e lista virtualizada nativa ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; fixture e query semântica cobrem papel/nome/estado/ação, limite/paginação, ambiguidade e stale ref; snapshots e espera podem ser restritos ao `app_pid` observado e refs estáveis são revalidadas no app/janela corretos. Escopo rico por app/janela exposto ao modelo e lista virtualizada nativa ainda faltam.
 
 ### T027 — Executar ações semânticas
 
@@ -391,7 +391,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T014,T024.
 - **Trabalho e entrega:** Resolver apps instalados, lançar com argumentos seguros e abrir pasta/arquivo no SO.
 - **Aceite:** Abrir Discord/VS Code não depende de caminho fixo; app ausente recebe orientação; spawn não basta como sucesso.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; `apps.resolve` consulta um catálogo bounded no PATH sem spawn e, no Linux, também percorre entradas `.desktop` limitadas; o planejador reconhece aliases de Discord/VS Code/Chrome como `apps.launch` externo e launch/open usam argv com `observed:false` quando só houve spawn; prova de Discord/VS Code e catálogo por SO ainda abertas.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; `apps.resolve` consulta um catálogo bounded no PATH sem spawn e, no Linux, também percorre entradas `.desktop` limitadas; o modelo configurado devolve uma decisão JSON validada antes de o broker receber `apps.launch`, e launch/open usam argv com `observed:false` quando só houve spawn; prova de Discord/VS Code e catálogo por SO ainda abertas.
 
 ### T034 — Gerenciar processos
 
@@ -418,7 +418,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T019,T029,T030,T032,T033,T034,T035.
 - **Trabalho e entrega:** Definir descrições/prompts de produto e contexto de capabilities para escolher GUI, shell ou arquivos.
 - **Aceite:** J02 combina ferramentas e verifica resultado; não exige GUI para criar cada arquivo.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; o core agora classifica janelas, arquivos, clipboard e escrita por intenção textual conservadora, enquanto o broker revalida schema, escopo e approval; catálogo completo, modelo comercial/local e verificação de jornada J02 ainda seguem abertos.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; o core envia catálogo e contexto redigido ao provider, aceita somente decisões JSON estruturadas, devolve cada resultado de ferramenta à rodada seguinte e mostra a solicitação redigida em “Ver atividade”; o broker revalida schema, escopo e approval. Avaliação com modelo comercial/local e verificação da jornada J02 ainda seguem abertas.
 
 ### T037 — Construir conversa e streaming nativos
 
@@ -454,7 +454,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T037,T038.
 - **Trabalho e entrega:** Implementar ocultar/reabrir/sair, foco preservado, monitores/DPI, teclado e semântica da própria UI.
 - **Aceite:** Sem roubo de foco na automação; UI testada por teclado/leitor de tela; Sair encerra workers.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; modo compacto, minimize/restore, tema e controles nativos foram implementados; captura visual, DPI e screen reader real ainda pendentes.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial; tema e controles nativos existem, e o único controle de visibilidade agora sempre recolhe para um acompanhamento compacto visível. Não há tray, atalho global ou outra rota de reativação validada, portanto a UI não oferece ocultar/minimizar a única janela. Captura visual, DPI, reativação residente e leitor de tela real continuam pendentes.
 
 ### T041 — Validar alpha com usuários de teste
 
@@ -634,7 +634,7 @@ Código revisado, compilação/lint aplicáveis aprovados, testes do comportamen
 - **Depende de:** T058,T059.
 - **Trabalho e entrega:** Revisar R01–R11, evidências/gates, artefatos finais e canal; executar smoke final e release.
 - **Aceite:** G6 aprovado; versão instalável distribuída no canal escolhido com hashes, docs e pendências não bloqueantes registradas.
-- **Execução:** status: não iniciada para publicação; [RELEASE](../docs/RELEASE.md) contém o gate, mas G6 continua aberto por multiplataforma, pacote, voz e beta.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: auditada e não aprovada para publicação. A [auditoria de prontidão](PRONTIDAO-2026-09-17.md) confirma o recorte Linux de desenvolvimento; o smoke remoto textual passou, mas G6 continua aberto por avaliação de modelo, voz, matriz multiplataforma, QA de interface, instaladores finais e beta.
 
 ### T061 — Avaliar OCR e visão opcionais
 
@@ -689,7 +689,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Materializar cabeçalho, campo, faixa de ação e seletor de modelo em egui.
   - [ ] Registrar ajustes de medidas e alternativas de decoração por SO.
 - **Aceite:** Capturas reais demonstram hierarquia e controles legíveis em 440 pt; nenhum CLI, dashboard ou WebView substitui a janela.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; modos, medidas 440/360, controles e limites foram materializados no `apps/desktop`; capturas reais e ajuste por SO ainda faltam.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; modos, medidas 440/360, controles e limites foram materializados no `apps/desktop`. Um smoke visual Xvfb da invocação revelou compositor cortado e colisão horizontal, ambos corrigidos ao ajustar a invocação para 440×280 e separar identificação do modelo dos botões. Capturas de tema/modos e ajuste por SO ainda faltam.
 
 ### T066 — Implementar controlador da janela
 
@@ -703,7 +703,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Detectar monitor/DPI, retirar coordenadas inválidas e respeitar área útil.
   - [ ] Implementar Manter acima opt-in, decoração nativa fallback e regras de foco.
 - **Aceite:** Monitor desconectado não perde janela; primeiro envio não causa crescimento por token; limitações do compositor têm fallback.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; viewport invocation/conversation/compact/approval, minimizar, nível always-on-top e fechamento ordenado existem; monitor/DPI/drag/restore real continuam pendentes.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; viewport invocation/conversation/compact/approval, mínimo normal de 320×260, minimizar, nível always-on-top e fechamento ordenado existem; monitor/DPI/drag/restore real continuam pendentes. Em GNOME/Wayland, o AT-SPI pode manter bounds anteriores após trocar o modo, portanto a geometria precisa de evidência de janela/screenshot além da árvore semântica.
 
 ### T067 — Implementar tokens e componentes nativos
 
@@ -717,7 +717,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Criar controles com default/hover/foco/pressionado/disabled/loading/error/success conforme semântica.
   - [ ] Medir contraste dos pares efetivos; documentar licenças de fontes/ícones e fallback.
 - **Aceite:** Tema consistente sem cores avulsas; foco imediato e geometria estável; texto e controles atingem contraste planejado.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: concluída no recorte local; tema claro/escuro, escala básica, foco/disabled e controles egui estão em `apps/desktop`; contraste formal e leitor de tela real ainda pertencem a T074.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; `VoxPalette` centraliza as cores claro/escuro previstas, e `vox_style` aplica superfícies, bordas, seleção, cursor/foco, espaçamento e raios estáveis no egui. A preferência persistida oferece Sistema/Claro/Escuro, migra a escolha booleana anterior e instala os dois estilos uma vez para reagir à troca de tema do SO; teste de contexto egui cobre fallback claro e a mudança recebida do sistema. Enviar e confirmação usam ação primária e Parar/Cancelar usam semântica de interrupção/erro, sem cores avulsas no fluxo principal. Fonte licenciada, medição de contraste dos pixels efetivos e QA completo por leitor de tela continuam abertos em T074.
 
 ### T068 — Implementar compositor e histórico de conversa
 
@@ -731,7 +731,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Preservar leitura durante streaming e oferecer Novas mensagens.
   - [ ] Suportar código longo/caminhos sem expandir janela e bloquear envio durante run ativo.
 - **Aceite:** UI01–UI03 passam; rascunho não some em erro de conexão; texto não executa HTML/comando.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: concluída no recorte local; streaming, draft multilinha, Enter/Shift+Enter, scroll e bloqueio de envio durante run estão em `apps/desktop`; IME e screenshots reais seguem em T075.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; streaming, draft multilinha, Enter/Shift+Enter, scroll, bloqueio de envio durante run e rascunho redigido por sessão estão em `apps/desktop`. A gravação é atrasada, é forçada ao trocar/ocultar/encerrar e o envio só limpa o rascunho após o core aceitar a tarefa; uma falha de dispatch remove a bolha otimista e preserva o texto. IME, leitura durante streaming, screenshots reais e QA visual seguem em T075.
 
 ### T069 — Implementar modo compacto e visibilidade
 
@@ -745,7 +745,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Ocultar durante run preserva parada; ocultar idle preserva rascunho.
   - [ ] Aprovação/conclusão/erro no compacto não roubam foco nem desaparecem automaticamente.
 - **Aceite:** UI04/UI14 passam; compactar não reinicia run; nenhum caminho visual deixa efeitos sem controle de parada disponível.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: concluída no recorte local; compacto preserva run/draft e mantém Expandir/Parar; aprovação/erro em app empacotado ainda precisam de QA.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; compacto preserva run/draft e mantém Expandir/Parar. `Recolher` sempre mantém a única janela visível em modo compacto, inclusive quando ociosa, pois ainda não existe tray, atalho global ou outra rota de reativação validada. O reducer e o smoke AT-SPI cobrem Recolher → Expandir; aprovação/erro no app empacotado e a futura ocultação residente ainda precisam de QA.
 
 ### T070 — Implementar navegação de sessões
 
@@ -759,7 +759,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Retornar à conversa restaurando rascunho e posição.
   - [ ] Exportar/apagar com política de dados e bloqueio de exclusão de run ativo.
 - **Aceite:** Trocar sessão não reproduz tools; não existe sidebar permanente; conversas longas não congelam render.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; histórico persistido tem busca por título, paginação, estado do último run, troca/restauração de mensagens, exportação redigida e exclusão confirmada; posição/rascunho por sessão e teste de conversa longa ainda faltam.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; histórico persistido tem busca por título, paginação, estado do último run, troca/restauração de mensagens, exportação redigida, exclusão confirmada e rascunho redigido isolado por sessão. A última sessão válida e seu rascunho são restaurados no reinício; posição de leitura e teste de conversa longa ainda faltam.
 
 ### T071 — Implementar preferências e onboarding completos
 
@@ -773,7 +773,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Mostrar capacidades ausentes e caminho de recuperação.
   - [ ] Bloquear troca de provider durante run; aplicar tema/escala sem reiniciar.
 - **Aceite:** UI10 passa e usuário chega à primeira tarefa sem conhecer Pi/xa11y; negar voz não bloqueia texto.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; tema e "manter acima" são preferências não secretas persistidas, a UI informa provider/capabilities/recuperação e oferece conta + campo mascarado para gravar explicitamente no keyring; endpoint/modelo também podem ser salvos sem segredo e agora reiniciam o core privado somente quando ocioso, mantendo a sessão e bloqueando a troca durante run. Permissões multiplataforma e onboarding completo ainda faltam.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; Sistema/Claro/Escuro e "manter acima" são preferências não secretas persistidas, a UI informa provider/capabilities/recuperação e oferece conta + campo mascarado para gravar explicitamente no keyring; endpoint/modelo também podem ser salvos sem segredo e agora reiniciam o core privado somente quando ocioso, mantendo a sessão e bloqueando a troca durante run. Permissões multiplataforma, teste de conexão acionado pelo usuário e onboarding completo ainda faltam.
 
 ### T072 — Implementar atividade, aprovação e falha parcial
 
@@ -787,7 +787,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Vincular decisão a approval_id; impedir Enter residual e confirmar revalidação.
   - [ ] Mostrar cancelamento, sucesso verificado e efeito parcial/incerto distintamente.
 - **Aceite:** UI05/UI06/UI12 passam; Parar permanece acessível; nenhum percentual é inventado; resultado parcial não aparece como sucesso integral.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; faixa de atividade, preview de tool/argumentos, approval_id persistido, aprovação/negação, erro, unknown distinto de sucesso e Parar estão ligados ao broker; pós-condição de app real e lista de atividade visual completa ainda faltam.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; faixa de atividade, preview de tool/argumentos redigidos, approval_id persistido, aprovação/negação, erro, unknown distinto de sucesso e Parar estão ligados ao broker. Os controles de decisão agora nomeiam o efeito ("Substituir arquivo", "Executar comando" etc.), e o compositor recusa envio por Enter enquanto houver aprovação pendente; testes cobrem os rótulos e essa guarda. Pós-condição de app real e lista de atividade visual completa ainda faltam.
 
 ### T073 — Implementar experiência visual e acessível de voz
 
@@ -815,7 +815,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Testar largura 320/360/440/640 e texto 100/150/200%.
   - [ ] Verificar labels, anúncio de mudanças sem leitura token a token, menus e retorno de foco.
 - **Aceite:** Nenhum controle crítico cortado/inacessível; nenhuma funcionalidade só por hover; evidência por SO e falhas corrigidas.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; teclado, labels visuais, modos e escalas de viewport têm cobertura de código; leitor de tela, 100/150/200%, 320/640 e evidência por SO aguardam QA real.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial; o smoke AT-SPI real da própria janela comprova labels básicos, menu, compacto/expandido, Preferências e as opções de tema Sistema/Claro/Escuro quando o leitor de tela está ativo; teclado, 100/150/200%, 320/640, anúncios e evidência por SO aguardam QA real.
 
 ### T075 — Criar suíte de estados e fluxos da interface
 
@@ -829,7 +829,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Registrar screenshots reais claro/escuro de todos os modos.
   - [ ] Testar teclado/scroll/IME e aprovações além da comparação visual.
 - **Aceite:** Relatório distingue testes automáticos e manuais; nenhuma captura bonita substitui aceite comportamental.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; reducer e fixtures de erro/approval/compacto têm testes unitários; UI01–UI16 com screenshots e teclado/IME ainda não foram executados no desktop real.
+- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; reducer e fixtures de erro/approval/compacto têm testes unitários e o smoke AT-SPI real atravessa abertura de menu, compacto/expandido e Preferências; UI01–UI16 com screenshots e teclado/IME ainda não foram executados no desktop real.
 
 ### T076 — Polir responsividade e consumo da janela
 
@@ -871,7 +871,7 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
   - [ ] Testar migração N−1→N, rollback de falha e recuperação de unknown.
   - [ ] Testar exclusão/exportação redigida e não persistência de áudio/aprovação reutilizável.
 - **Aceite:** Crash entre efeito e resultado não provoca replay; migrações preservam mensagens e falham de forma recuperável.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial forte; SQLite v1→v3, reopen, preferences, recovery, retenção, export redacted, approvals auditáveis/invalidados, lease, backup online e idempotência têm testes; rollback interrompido e prova negativa de áudio/approval reutilizável no pacote ainda faltam.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; SQLite v1→v4, reopen, preferences, recovery, retenção, export redacted, approvals auditáveis/invalidados, lease, backup online, idempotência e rascunho por sessão têm testes. O teste verifica diretamente que `session_drafts` e o backup não recebem o sentinela secreto; rollback interrompido e prova negativa de áudio/approval reutilizável no pacote ainda faltam.
 
 ### T079 — Construir fixture semântica adversarial
 
@@ -881,11 +881,11 @@ Estes pacotes complementam T001–T064. Não são opcionais nem pressupõem que 
 - **Trabalho e entrega:** Criar aplicação de teste controlada que exerça bordas da acessibilidade.
 - **Referência:** [12-detalhamento-tecnico-e-entregaveis.md](12-detalhamento-tecnico-e-entregaveis.md).
 - **Subtarefas:**
-  - [ ] Incluir nomes duplicados, senha, lista virtualizada, diálogo e nó recriado.
+  - [x] Incluir nomes duplicados, senha, lista virtualizada, diálogo e nó recriado.
   - [ ] Injetar mudança de janela/foco entre observação e ação.
-  - [ ] Medir limites de snapshot e retorno de ação sem pós-condição.
+  - [x] Medir limites de snapshot e retorno de ação sem pós-condição.
 - **Aceite:** Referência antiga nunca aciona outro alvo; senha não vaza; dispatch sem resultado não conta como sucesso.
-- **Execução:** responsável: Codex; data: 16/09/2026; status: parcial; `MockDesktop` cobre duplicidade, senha, toggle, stale ref e pós-condição local; fixture nativa com diálogo/lista virtualizada/nó recriado ainda não está disponível.
+- **Execução:** responsável: Codex; data: 17/09/2026; status: parcial forte; `tests/fixtures/accessibility_fixture.py` e `crates/desktop-access/tests/native_fixture.rs` passaram no AT-SPI real Linux. A fixture prova PID direcionado, nomes duplicados sem escolha implícita, senha e token em português redigidos e bloqueados para `set_value`, `press` com pós-condição `unknown`, `wait_for`, nó removido/recriado com rejeição de ref antiga, snapshot truncado por limite e diálogo Confirm. Ainda falta troca real de foco/janela entre observação e ação e a repetição em outros backends.
 
 ### T080 — Consolidar matriz de efeitos das ferramentas
 

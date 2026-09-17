@@ -31,7 +31,7 @@ Não expor exclusão permanente por padrão. Shell usa programa + argv quando po
 
 Campos: snapshot_id, captured_at, generation, app_id, window_id, focused_element, capabilities, nodes, truncated e continuation. Cada nó: element_ref opaco, parent_ref, role, name, value redigido, states, actions, description e bounds opcionais. Não serializar handles/pointers nativos nem campos de senha. Texto e nomes são conteúdo não confiável.
 
-Referências são vinculadas a app/janela/geração. Ação recebe referência, snapshot esperado, ação e argumentos. Antes do efeito: resolver novamente, verificar identidade, existência, estado e política. Elemento obsoleto retorna STALE_ELEMENT e exige nova observação. Ambiguidade não escolhe primeiro candidato silenciosamente. Lista virtualizada exige navegação/paginação limitada; indicar o que não foi observado.
+Referências são vinculadas a app/janela/geração. O broker guarda cada snapshot que emite e o modelo só devolve `snapshot_id`, nunca uma árvore serializada como autorização; a referência expira rapidamente, é vinculada ao run e é consumida por uma ação. Antes do efeito: resolver novamente, verificar identidade, existência, estado e política. Elemento obsoleto retorna STALE_ELEMENT e exige nova observação. Ambiguidade não escolhe primeiro candidato silenciosamente. Lista virtualizada exige navegação/paginação limitada; indicar o que não foi observado.
 
 ## Execução e cancelamento
 

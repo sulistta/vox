@@ -154,12 +154,18 @@ impl AgentSupervisor {
             .name("vox-core-stderr".into())
             .spawn(move || {
                 let reader = BufReader::new(stderr);
+                let mut reported = false;
                 for line in reader.lines() {
                     if shutdown_rx.try_recv().is_ok() {
                         break;
                     }
-                    if let Ok(line) = line {
-                        eprintln!("[vox-agent] {line}");
+                    if line.is_ok() && !reported {
+                        // A provider or an unexpected dependency can echo a
+                        // request on stderr. The structured protocol carries
+                        // the user-safe error state, so never mirror raw
+                        // diagnostics into the desktop process log.
+                        eprintln!("[vox-agent] diagnóstico do core suprimido para proteger conteúdo sensível");
+                        reported = true;
                     }
                 }
             })
@@ -216,7 +222,31 @@ impl AgentSupervisor {
         run_id: &str,
         content: &str,
     ) -> Result<(), SupervisorError> {
-        self.send(&json!({"type":"turn.start","request_id":request_id,"session_id":session_id,"run_id":run_id,"content":content,"source":"text"}))
+        self.start_turn_with_context(request_id, session_id, run_id, content, "text", &[])
+    }
+
+    /// Start a turn with a bounded, already-redacted conversation context.
+    /// The supervisor only transports it; construction and authorization stay
+    /// with the desktop/session layers and the core validates the final IPC
+    /// shape before using it.
+    pub fn start_turn_with_context(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        run_id: &str,
+        content: &str,
+        source: &str,
+        context: &[Value],
+    ) -> Result<(), SupervisorError> {
+        self.send(&json!({
+            "type":"turn.start",
+            "request_id":request_id,
+            "session_id":session_id,
+            "run_id":run_id,
+            "content":content,
+            "source":source,
+            "context":context,
+        }))
     }
 
     pub fn cancel(&self, request_id: &str, run_id: &str) -> Result<(), SupervisorError> {

@@ -57,6 +57,27 @@ test("accepts bounded context and rejects an invalid effect", () => {
   );
 });
 
+test("accepts only bounded, explicitly redacted model activity", () => {
+  const valid = {
+    type: "model.requested",
+    session_id: "session-activity",
+    run_id: "run-activity",
+    round: 1,
+    provider: "openai-compatible",
+    model_ref: "local-model",
+    redacted: true,
+    messages: [
+      { role: "system", content: "Use JSON decisions." },
+      { role: "user", content: "API_KEY=[REDACTED]" },
+    ],
+  };
+  assert.equal(parseMessage(JSON.stringify(valid)).type, "model.requested");
+  assert.throws(
+    () => parseMessage(JSON.stringify({ ...valid, redacted: false })),
+    (error: unknown) => error instanceof ProtocolError && error.code === "INVALID_FIELD",
+  );
+});
+
 test("rejects invalid JSON and unknown types", () => {
   assert.throws(() => parseMessage("{"), (error) => error instanceof ProtocolError && error.code === "INVALID_JSON");
   assert.throws(() => parseMessage('{"type":"delete_everything"}'), (error) => error instanceof ProtocolError && error.code === "UNKNOWN_TYPE");

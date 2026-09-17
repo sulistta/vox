@@ -7,10 +7,30 @@ export type VoiceErrorCode =
   | "EMPTY_TRANSCRIPT"
   | "MAX_DURATION"
   | "PERMISSION_DENIED"
+  | "TRANSCRIPTION_UNAVAILABLE"
   | "TRANSCRIPTION_FAILED";
 
 export interface Transcriber {
   transcribe(audio: Uint8Array, signal: AbortSignal): Promise<string>;
+}
+
+/**
+ * A deliberate, user-visible fallback while no STT engine is connected.
+ * It prevents callers from treating raw microphone bytes as a completed turn.
+ */
+export class UnavailableTranscriber implements Transcriber {
+  constructor(private readonly reason = "no speech-to-text engine is configured") {}
+
+  async transcribe(_audio: Uint8Array, _signal: AbortSignal): Promise<string> {
+    throw new VoiceTranscriptionUnavailableError(this.reason);
+  }
+}
+
+export class VoiceTranscriptionUnavailableError extends Error {
+  constructor(message = "no speech-to-text engine is configured") {
+    super(message);
+    this.name = "VoiceTranscriptionUnavailableError";
+  }
 }
 
 export interface VoiceSnapshot {
@@ -99,9 +119,11 @@ export class VoiceController {
     } catch (error) {
       if (operation !== this.operation) return this.snapshot();
       if (signal.aborted) return this.cancel(elapsedMs);
-      const code = error instanceof Error && /permission/iu.test(error.message)
-        ? "PERMISSION_DENIED"
-        : "TRANSCRIPTION_FAILED";
+      const code = error instanceof VoiceTranscriptionUnavailableError
+        ? "TRANSCRIPTION_UNAVAILABLE"
+        : error instanceof Error && /permission/iu.test(error.message)
+          ? "PERMISSION_DENIED"
+          : "TRANSCRIPTION_FAILED";
       return this.fail(code, error instanceof Error ? error.message : "transcription failed", elapsedMs);
     }
     return this.snapshot();

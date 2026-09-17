@@ -47,6 +47,7 @@ pub fn validate_line(line: &str) -> Result<Value, ProtocolError> {
         "approval.required",
         "state.changed",
         "message.delta",
+        "model.requested",
         "run.completed",
         "run.failed",
         "run.cancelled",
@@ -123,6 +124,45 @@ pub fn validate_line(line: &str) -> Result<Value, ProtocolError> {
                 .ok_or(ProtocolError::InvalidField("status"))?;
             if !["success", "error", "cancelled", "unknown"].contains(&status) {
                 return Err(ProtocolError::InvalidField("status"));
+            }
+        }
+        "model.requested" => {
+            require_string(object, "session_id")?;
+            require_string(object, "run_id")?;
+            require_string(object, "provider")?;
+            if object.get("model_ref").is_some() {
+                require_string(object, "model_ref")?;
+            }
+            if !matches!(object.get("round").and_then(Value::as_u64), Some(1..=32)) {
+                return Err(ProtocolError::InvalidField("round"));
+            }
+            if object.get("redacted").and_then(Value::as_bool) != Some(true) {
+                return Err(ProtocolError::InvalidField("redacted"));
+            }
+            let messages = object
+                .get("messages")
+                .and_then(Value::as_array)
+                .ok_or(ProtocolError::InvalidField("messages"))?;
+            if messages.is_empty() || messages.len() > 128 {
+                return Err(ProtocolError::InvalidField("messages"));
+            }
+            for message in messages {
+                let message = message
+                    .as_object()
+                    .ok_or(ProtocolError::InvalidField("messages"))?;
+                if !matches!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("system" | "user" | "assistant")
+                ) {
+                    return Err(ProtocolError::InvalidField("messages.role"));
+                }
+                if message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_none_or(|content| content.len() > 64 * 1024)
+                {
+                    return Err(ProtocolError::InvalidField("messages.content"));
+                }
             }
         }
         "initialized" => {
@@ -233,6 +273,33 @@ mod tests {
         assert_eq!(
             validate_line(&invalid.to_string()),
             Err(ProtocolError::InvalidField("context.effect"))
+        );
+    }
+
+    #[test]
+    fn accepts_only_explicitly_redacted_model_activity() {
+        let valid = serde_json::json!({
+            "type": "model.requested",
+            "session_id": "session",
+            "run_id": "run",
+            "round": 1,
+            "provider": "openai-compatible",
+            "redacted": true,
+            "messages": [{"role":"user", "content":"token=[REDACTED]"}]
+        });
+        assert!(validate_line(&valid.to_string()).is_ok());
+        let invalid = serde_json::json!({
+            "type": "model.requested",
+            "session_id": "session",
+            "run_id": "run",
+            "round": 0,
+            "provider": "openai-compatible",
+            "redacted": false,
+            "messages": []
+        });
+        assert_eq!(
+            validate_line(&invalid.to_string()),
+            Err(ProtocolError::InvalidField("round"))
         );
     }
 

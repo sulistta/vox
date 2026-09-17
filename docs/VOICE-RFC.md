@@ -23,12 +23,15 @@ por `accept()` como conteúdo de um `turn.start` com `source: "voice"`.
 
 Os testes cobrem revisão antes do turno, áudio/transcrição vazios,
 cancelamento, expiração de duração e a fronteira de captura bounded do crate
-[`vox-audio-capture`](./VOICE-CAPTURE.md). A implementação nativa já possui
-backend Linux por PipeWire/ALSA, encerramento por key-up/perda de foco,
-watchdog e limite de memória. Ainda não seleciona dispositivo por uma UI,
-solicita permissões da sessão, executa STT ou envia áudio: essas partes
-continuam dependentes da integração nativa completa e de uma medição com
-hardware autorizada.
+[`vox-audio-capture`](./VOICE-CAPTURE.md). O `UnavailableTranscriber` marca a
+ausência de STT como `TRANSCRIPTION_UNAVAILABLE`, sem permitir que bytes de
+áudio virem uma mensagem. A janela consulta o backend Linux por PipeWire/ALSA
+sem iniciar uma gravação e deixa a voz explicitamente desabilitada até haver
+uma transcrição conectada. A implementação nativa já possui encerramento por
+key-up/perda de foco, watchdog e limite de memória. Ainda não seleciona
+dispositivo por uma UI, solicita permissões da sessão, executa STT ou envia
+áudio: essas partes continuam dependentes da integração nativa completa e de
+uma medição com hardware autorizada.
 
 ## Comparação a executar
 

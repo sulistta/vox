@@ -31,6 +31,15 @@ pub struct MessageRecord {
     pub seq: i64,
 }
 
+/// A redacted, bounded message that may be included in a later model turn.
+/// This is deliberately separate from the database row so callers cannot
+/// accidentally treat identifiers or timestamps as model context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelContextMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunRecord {
     pub id: String,
@@ -74,13 +83,14 @@ pub struct SessionStore {
     connection: Connection,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 impl SessionStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let connection = Connection::open(path).map_err(classify_sql_error)?;
         let store = Self { connection };
         store.migrate().map_err(classify_store_error)?;
+        store.redact_legacy_sensitive_values()?;
         store.recover_interrupted()?;
         Ok(store)
     }
@@ -89,6 +99,7 @@ impl SessionStore {
         let connection = Connection::open_in_memory()?;
         let store = Self { connection };
         store.migrate().map_err(classify_store_error)?;
+        store.redact_legacy_sensitive_values()?;
         store.recover_interrupted()?;
         Ok(store)
     }
@@ -116,6 +127,13 @@ impl SessionStore {
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS desktop_lease(id INTEGER PRIMARY KEY CHECK (id = 1), owner_id TEXT NOT NULL, heartbeat_at INTEGER NOT NULL);",
+        )?;
+        self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        // Version 4 keeps an unsent composer value with its session. It is
+        // deliberately separate from the transcript and export, and content
+        // is redacted before it reaches this table.
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_drafts(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, content TEXT NOT NULL, updated_at TEXT NOT NULL);",
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", params![CURRENT_SCHEMA_VERSION])?;
         Ok(())
@@ -156,6 +174,103 @@ impl SessionStore {
             params![session_id],
         )?;
         Ok(record)
+    }
+
+    /// Store the unsent composer value separately from the transcript. An
+    /// empty draft removes its row, and a session deletion cascades to it.
+    /// Drafts are never included in `export_session`.
+    pub fn save_draft(&self, session_id: &str, content: &str) -> Result<(), StoreError> {
+        if !self.session_exists(session_id)? {
+            return Err(StoreError::SessionNotFound);
+        }
+        let content = redact_sensitive(content);
+        if content.is_empty() {
+            self.connection.execute(
+                "DELETE FROM session_drafts WHERE session_id=?1",
+                params![session_id],
+            )?;
+        } else {
+            self.connection.execute(
+                "INSERT INTO session_drafts(session_id,content,updated_at) VALUES (?1,?2,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                 ON CONFLICT(session_id) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at",
+                params![session_id, content],
+            )?;
+        }
+        self.connection.execute(
+            "UPDATE sessions SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn draft(&self, session_id: &str) -> Result<Option<String>, StoreError> {
+        if !self.session_exists(session_id)? {
+            return Err(StoreError::SessionNotFound);
+        }
+        self.connection
+            .query_row(
+                "SELECT content FROM session_drafts WHERE session_id=?1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|content| content.map(|content| redact_sensitive(&content)))
+            .map_err(Into::into)
+    }
+
+    /// Reserve the next chronological sequence number for a session. The UI
+    /// cannot derive this from visible bubbles because redacted internal tool
+    /// observations are intentionally kept out of the chat transcript.
+    pub fn next_message_sequence(&self, session_id: &str) -> Result<i64, StoreError> {
+        if !self.session_exists(session_id)? {
+            return Err(StoreError::SessionNotFound);
+        }
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id=?1",
+            params![session_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Return earlier conversation messages in chronological order for a new
+    /// model turn. `before_seq` excludes the message currently being sent,
+    /// which avoids presenting the same user request twice. Content was
+    /// redacted when it was persisted and roles are revalidated here before
+    /// leaving the storage boundary.
+    pub fn model_context_before(
+        &self,
+        session_id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<ModelContextMessage>, StoreError> {
+        if !self.session_exists(session_id)? {
+            return Err(StoreError::SessionNotFound);
+        }
+        let limit = limit.clamp(1, 100) as i64;
+        let mut statement = self.connection.prepare(
+            "SELECT role,content FROM (
+                 SELECT role,content,seq FROM messages
+                 WHERE session_id=?1 AND seq < ?2
+                 ORDER BY seq DESC LIMIT ?3
+             ) ORDER BY seq ASC",
+        )?;
+        let rows = statement.query_map(params![session_id, before_seq, limit], |row| {
+            Ok(ModelContextMessage {
+                role: row.get(0)?,
+                content: redact_sensitive(&row.get::<_, String>(1)?),
+            })
+        })?;
+        let mut context = Vec::new();
+        for row in rows {
+            let message = row?;
+            if matches!(
+                message.role.as_str(),
+                "system" | "user" | "assistant" | "tool"
+            ) {
+                context.push(message);
+            }
+        }
+        Ok(context)
     }
 
     pub fn start_run(
@@ -322,7 +437,9 @@ impl SessionStore {
         side_effect: &str,
         data: &serde_json::Value,
     ) -> Result<bool, StoreError> {
-        let data = redact_sensitive(&serde_json::to_string(data).unwrap_or_else(|_| "null".into()));
+        let data = redact_sensitive(
+            &serde_json::to_string(&redact_json_value(data)).unwrap_or_else(|_| "null".into()),
+        );
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO effects(idempotency_key,run_id,call_id,tool,status,side_effect,data,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             params![idempotency_key, run_id, call_id, tool, status, side_effect, data],
@@ -338,7 +455,9 @@ impl SessionStore {
         tool: &str,
         data: &serde_json::Value,
     ) -> Result<bool, StoreError> {
-        let data = redact_sensitive(&serde_json::to_string(data).unwrap_or_else(|_| "null".into()));
+        let data = redact_sensitive(
+            &serde_json::to_string(&redact_json_value(data)).unwrap_or_else(|_| "null".into()),
+        );
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO effects(idempotency_key,run_id,call_id,tool,status,side_effect,data,created_at) VALUES (?1,?2,?3,?4,'pending','unknown',?5,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             params![idempotency_key, run_id, call_id, tool, data],
@@ -353,7 +472,9 @@ impl SessionStore {
         side_effect: &str,
         data: &serde_json::Value,
     ) -> Result<bool, StoreError> {
-        let data = redact_sensitive(&serde_json::to_string(data).unwrap_or_else(|_| "null".into()));
+        let data = redact_sensitive(
+            &serde_json::to_string(&redact_json_value(data)).unwrap_or_else(|_| "null".into()),
+        );
         let changed = self.connection.execute(
             "UPDATE effects SET status=?1, side_effect=?2, data=?3 WHERE idempotency_key=?4 AND status='pending'",
             params![status, side_effect, data, idempotency_key],
@@ -442,7 +563,7 @@ impl SessionStore {
                         tool: row.get(3)?,
                         status: row.get(4)?,
                         side_effect: row.get(5)?,
-                        data: row.get(6)?,
+                        data: redact_sensitive(&row.get::<_, String>(6)?),
                     })
                 },
             )
@@ -530,14 +651,102 @@ impl SessionStore {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
                 role: row.get(2)?,
-                content: row.get(3)?,
+                content: redact_sensitive(&row.get::<_, String>(3)?),
                 seq: row.get(4)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    fn session_exists(&self, session_id: &str) -> Result<bool, StoreError> {
+    /// Older databases and manually changed SQLite files are treated as
+    /// untrusted input. Scrub values that can otherwise be copied by a backup
+    /// before the application exposes or snapshots them.
+    fn redact_legacy_sensitive_values(&self) -> Result<(), StoreError> {
+        let messages = {
+            let mut statement = self.connection.prepare("SELECT id,content FROM messages")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, content) in messages {
+            let redacted = redact_sensitive(&content);
+            if redacted != content {
+                self.connection.execute(
+                    "UPDATE messages SET content=?1 WHERE id=?2",
+                    params![redacted, id],
+                )?;
+            }
+        }
+
+        let effects = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT idempotency_key,data FROM effects")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, data) in effects {
+            let redacted = redact_sensitive(&data);
+            if redacted != data {
+                self.connection.execute(
+                    "UPDATE effects SET data=?1 WHERE idempotency_key=?2",
+                    params![redacted, id],
+                )?;
+            }
+        }
+
+        let drafts = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT session_id,content FROM session_drafts")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (session_id, content) in drafts {
+            let redacted = redact_sensitive(&content);
+            if redacted != content {
+                self.connection.execute(
+                    "UPDATE session_drafts SET content=?1 WHERE session_id=?2",
+                    params![redacted, session_id],
+                )?;
+            }
+        }
+
+        // Provider metadata must never become a second credential store. If
+        // an older/manual preference contains a secret, remove that value
+        // instead of saving a redacted endpoint or model that cannot work.
+        let provider_preferences = {
+            let mut statement = self.connection.prepare(
+                "SELECT key,value FROM preferences WHERE key IN ('provider_account','provider_base_url','provider_model')",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (key, value) in provider_preferences {
+            if redact_sensitive(&value) != value {
+                self.connection
+                    .execute("DELETE FROM preferences WHERE key=?1", params![key])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn session_exists(&self, session_id: &str) -> Result<bool, StoreError> {
         Ok(self
             .connection
             .query_row(
@@ -552,22 +761,133 @@ impl SessionStore {
 
 fn redact_sensitive(value: &str) -> String {
     let mut redacted = value.to_owned();
-    for marker in ["Bearer ", "sk-", "api_key=", "api-key=", "token="] {
+    for marker in [
+        "Bearer ",
+        "sk-",
+        "api_key=",
+        "api-key=",
+        "token=",
+        "secret=",
+        "password=",
+        "senha=",
+        "segredo=",
+        "chave=",
+        "credencial=",
+        "credenciais=",
+        "api_key:",
+        "api-key:",
+        "token:",
+        "secret:",
+        "password:",
+        "senha:",
+        "segredo:",
+        "chave:",
+        "credencial:",
+        "credenciais:",
+        "\"api_key\":",
+        "\"api-key\":",
+        "\"token\":",
+        "\"secret\":",
+        "\"password\":",
+        "\"senha\":",
+        "\"segredo\":",
+        "\"chave\":",
+        "\"credencial\":",
+        "\"credenciais\":",
+        "\"authorization\":",
+    ] {
         let mut cursor = 0;
-        while let Some(relative) = redacted[cursor..].find(marker) {
+        while let Some(relative) = find_ascii_case_insensitive(&redacted[cursor..], marker) {
             let start = cursor + relative;
-            let value_start = start + marker.len();
+            let mut value_start = start + marker.len();
+            while redacted
+                .as_bytes()
+                .get(value_start)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value_start += 1;
+            }
+            let quote = match redacted.as_bytes().get(value_start).copied() {
+                Some(byte @ (b'\'' | b'\"')) => Some(byte),
+                _ => None,
+            };
+            if quote.is_some() {
+                value_start += 1;
+            }
             let end = redacted[value_start..]
                 .find(|character: char| {
-                    character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}')
+                    quote.map_or_else(
+                        || character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}'),
+                        |quote| character == quote as char,
+                    )
                 })
                 .map(|offset| value_start + offset)
                 .unwrap_or(redacted.len());
-            redacted.replace_range(value_start..end, "[REDACTED]");
-            cursor = value_start + "[REDACTED]".len();
+            if value_start < end {
+                redacted.replace_range(value_start..end, "[REDACTED]");
+                cursor = value_start + "[REDACTED]".len();
+            } else {
+                cursor = value_start.saturating_add(1);
+            }
         }
     }
     redacted
+}
+
+fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) => serde_json::Value::String(redact_sensitive(value)),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_json_value).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let normalized = key.to_ascii_lowercase();
+                    let sensitive = [
+                        "api_key",
+                        "api-key",
+                        "authorization",
+                        "cookie",
+                        "credential",
+                        "credencial",
+                        "credenciais",
+                        "password",
+                        "senha",
+                        "private_key",
+                        "private-key",
+                        "secret",
+                        "segredo",
+                        "token",
+                        "chave",
+                    ]
+                    .iter()
+                    .any(|needle| normalized.contains(needle));
+                    (
+                        key.clone(),
+                        if sensitive {
+                            serde_json::Value::String("[REDACTED]".into())
+                        } else {
+                            redact_json_value(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+/// Credentials commonly arrive in environment-style uppercase names.  Keep
+/// matching ASCII-only and byte preserving so indexes remain valid for the
+/// original UTF-8 string while we redact the following value.
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|candidate| candidate.eq_ignore_ascii_case(needle))
 }
 
 fn classify_sql_error(error: rusqlite::Error) -> StoreError {
@@ -602,11 +922,54 @@ mod tests {
     }
 
     #[test]
+    fn next_message_sequence_accounts_for_hidden_tool_context() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let session = store.create_session("sequence").unwrap();
+        assert_eq!(store.next_message_sequence(&session).unwrap(), 0);
+        store.append_message(&session, "user", "pedido", 0).unwrap();
+        store
+            .append_message(&session, "tool", "resultado redigido", 1)
+            .unwrap();
+        assert_eq!(store.next_message_sequence(&session).unwrap(), 2);
+    }
+
+    #[test]
+    fn model_context_is_redacted_ordered_bounded_and_excludes_current_turn() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let session = store.create_session("context").unwrap();
+        store
+            .append_message(&session, "user", "primeira API_KEY=secret-one", 0)
+            .unwrap();
+        store
+            .append_message(&session, "assistant", "primeira resposta", 1)
+            .unwrap();
+        store
+            .append_message(&session, "user", "segundo pedido", 2)
+            .unwrap();
+
+        let context = store.model_context_before(&session, 2, 10).unwrap();
+        assert_eq!(context.len(), 2);
+        assert_eq!(context[0].role, "user");
+        assert!(context[0].content.contains("[REDACTED]"));
+        assert!(!context[0].content.contains("secret-one"));
+        assert_eq!(context[1].content, "primeira resposta");
+
+        let bounded = store.model_context_before(&session, 3, 1).unwrap();
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].content, "segundo pedido");
+    }
+
+    #[test]
     fn a06_secrets_are_redacted_from_messages_effects_and_exports() {
         let store = SessionStore::open_in_memory().unwrap();
         let session = store.create_session("test").unwrap();
         store
-            .append_message(&session, "user", "Bearer super-secret", 1)
+            .append_message(
+                &session,
+                "user",
+                "Bearer super-secret e {\"api_key\":\"json-secret\"} sk-or-v1-0123456789abcdef0123456789abcdef",
+                1,
+            )
             .unwrap();
         assert!(store
             .record_effect(
@@ -632,7 +995,31 @@ mod tests {
             .unwrap());
         let export = store.export_session(&session).unwrap();
         assert!(!export.contains("super-secret"));
+        assert!(!export.contains("json-secret"));
+        assert!(!export.contains("sk-or-v1-0123456789abcdef0123456789abcdef"));
         assert!(!export.contains("\"token\":\"secret\""));
+    }
+
+    #[test]
+    fn quoted_credential_values_with_spaces_are_fully_redacted() {
+        let redacted = redact_sensitive(
+            "password=\"english secret with spaces\" senha='segredo em portugues com espacos'",
+        );
+        assert!(!redacted.contains("english secret with spaces"));
+        assert!(!redacted.contains("segredo em portugues com espacos"));
+        assert_eq!(redacted, "password=\"[REDACTED]\" senha='[REDACTED]'");
+    }
+
+    #[test]
+    fn structured_effect_values_redact_sensitive_keys_recursively() {
+        let redacted = redact_json_value(&serde_json::json!({
+            "authorization": "Bearer visible-never",
+            "nested": {"token": "nested-never", "safe": "kept"},
+        }));
+        let rendered = redacted.to_string();
+        assert!(!rendered.contains("visible-never"));
+        assert!(!rendered.contains("nested-never"));
+        assert!(rendered.contains("kept"));
     }
 
     #[test]
@@ -671,6 +1058,139 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn drafts_are_per_session_durable_redacted_and_removed_with_the_session() {
+        let path = std::env::temp_dir().join(format!(
+            "vox-session-draft-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let backup = path.with_extension("draft.backup.sqlite");
+        let first;
+        let second;
+        {
+            let store = SessionStore::open(&path).unwrap();
+            first = store.create_session("first").unwrap();
+            second = store.create_session("second").unwrap();
+            store
+                .save_draft(
+                    &first,
+                    "continuar depois sk-or-v1-0123456789abcdef0123456789abcdef",
+                )
+                .unwrap();
+            store.save_draft(&second, "rascunho separado").unwrap();
+            let stored_first_draft: String = store
+                .connection
+                .query_row(
+                    "SELECT content FROM session_drafts WHERE session_id=?1",
+                    params![first],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!stored_first_draft.contains("sk-or-v1-0123456789abcdef0123456789abcdef"));
+            assert!(stored_first_draft.contains("[REDACTED]"));
+            let first_draft = store.draft(&first).unwrap().unwrap();
+            assert!(!first_draft.contains("sk-or-v1-0123456789abcdef0123456789abcdef"));
+            assert!(first_draft.contains("[REDACTED]"));
+            assert_eq!(
+                store.draft(&second).unwrap().as_deref(),
+                Some("rascunho separado")
+            );
+            assert!(!store
+                .export_session(&second)
+                .unwrap()
+                .contains("rascunho separado"));
+            store.backup_to(&backup).unwrap();
+        }
+        let backup_connection = Connection::open(&backup).unwrap();
+        let backed_up_first_draft: String = backup_connection
+            .query_row(
+                "SELECT content FROM session_drafts WHERE session_id=?1",
+                params![first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!backed_up_first_draft.contains("sk-or-v1-0123456789abcdef0123456789abcdef"));
+        {
+            let store = SessionStore::open(&path).unwrap();
+            assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+            assert!(store.draft(&first).unwrap().unwrap().contains("[REDACTED]"));
+            store.save_draft(&first, "").unwrap();
+            assert_eq!(store.draft(&first).unwrap(), None);
+            store.delete_session(&second).unwrap();
+            assert!(matches!(
+                store.draft(&second),
+                Err(StoreError::SessionNotFound)
+            ));
+        }
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(backup);
+    }
+
+    #[test]
+    fn reopening_scrubs_legacy_sensitive_values_before_reading_or_backup() {
+        let path = std::env::temp_dir().join(format!(
+            "vox-session-redaction-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let backup = path.with_extension("backup.sqlite");
+        let session;
+        let provider_key = "sk-or-v1-0123456789abcdef0123456789abcdef";
+        {
+            let store = SessionStore::open(&path).unwrap();
+            session = store.create_session("legacy").unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO messages(id,session_id,role,content,seq,created_at) VALUES ('legacy-message',?1,'user',?2,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![session, provider_key],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO preferences(key,value,schema_version) VALUES ('provider_model',?1,1)",
+                    params![provider_key],
+                )
+                .unwrap();
+        }
+        {
+            let store = SessionStore::open(&path).unwrap();
+            let message = store.messages(&session).unwrap().remove(0);
+            assert!(!message.content.contains(provider_key));
+            assert_eq!(store.preference("provider_model").unwrap(), None);
+            let stored: String = store
+                .connection
+                .query_row(
+                    "SELECT content FROM messages WHERE id='legacy-message'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!stored.contains(provider_key));
+
+            store.backup_to(&backup).unwrap();
+        }
+        let backup_connection = Connection::open(&backup).unwrap();
+        let backed_up: String = backup_connection
+            .query_row(
+                "SELECT content FROM messages WHERE id='legacy-message'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!backed_up.contains(provider_key));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(backup);
     }
 
     #[test]

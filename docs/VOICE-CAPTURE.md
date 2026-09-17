@@ -17,10 +17,13 @@ marcado como truncado para evitar deadlock de pipe e crescimento ilimitado de
 memória.
 
 O backend tem testes determinísticos de captura bounded, pico de nível,
-cancelamento por foco, duplicidade e limite de bytes. A UI não habilita o
-controle ainda: falta selecionar/empacotar uma engine STT, solicitar a
-permissão da sessão e ligar a transcrição revisável ao `turn.start`. Nenhuma
-captura de microfone real é feita automaticamente pelos testes.
+cancelamento por foco, duplicidade e limite de bytes. A janela detecta o
+backend disponível sem abrir o microfone e mostra essa informação ao usuário.
+Ela mantém o controle de voz desabilitado enquanto não houver uma engine STT
+conectada, porque áudio bruto não pode virar um `turn.start`. Ainda falta
+selecionar/empacotar essa engine, solicitar a permissão da sessão e ligar a
+transcrição revisável ao turno. Nenhuma captura de microfone real é feita
+automaticamente pelos testes.
 
 ## Verificação manual por plataforma
 

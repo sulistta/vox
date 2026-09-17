@@ -127,6 +127,28 @@ export interface MessageDeltaEvent {
   delta: string;
 }
 
+/**
+ * A bounded, redacted copy of one chat message that was sent to a provider.
+ * It exists solely for the user's transparency view; it is never a model
+ * response, a tool authorization, or a substitute for the provider payload.
+ */
+export interface ModelActivityMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ModelRequestedEvent {
+  type: "model.requested";
+  session_id: string;
+  run_id: string;
+  round: number;
+  provider: string;
+  model_ref?: string;
+  messages: ModelActivityMessage[];
+  /** The core promises these messages have passed its secret redaction filter. */
+  redacted: true;
+}
+
 interface ToolEventFields {
   session_id: string;
   run_id: string;
@@ -214,6 +236,7 @@ export type IpcEvent =
   | SessionOpenedEvent
   | StateChangedEvent
   | MessageDeltaEvent
+  | ModelRequestedEvent
   | ToolStartedEvent
   | ToolRequestedEvent
   | ToolCompletedEvent
@@ -240,6 +263,7 @@ const allowedTypes = new Set([
   "approval.required",
   "state.changed",
   "message.delta",
+  "model.requested",
   "run.completed",
   "run.failed",
   "run.cancelled",
@@ -311,6 +335,27 @@ export function parseMessage(line: string): IpcMessage {
     requiredString(value, "call_id");
     requiredString(value, "tool");
     if (!["success", "error", "cancelled", "unknown"].includes(String(value.status))) throw new ProtocolError("INVALID_FIELD", "invalid tool status");
+  }
+  if (kind === "model.requested") {
+    requiredString(value, "session_id");
+    requiredString(value, "run_id");
+    requiredString(value, "provider");
+    if (value.model_ref !== undefined) requiredString(value, "model_ref");
+    if (!Number.isInteger(value.round) || (value.round as number) < 1 || (value.round as number) > 32) {
+      throw new ProtocolError("INVALID_FIELD", "round is invalid");
+    }
+    if (value.redacted !== true) throw new ProtocolError("INVALID_FIELD", "model activity must be redacted");
+    if (!Array.isArray(value.messages) || value.messages.length === 0 || value.messages.length > 128) {
+      throw new ProtocolError("INVALID_FIELD", "model activity messages are invalid");
+    }
+    for (const message of value.messages) {
+      if (!isObject(message) || !["system", "user", "assistant"].includes(String(message.role))) {
+        throw new ProtocolError("INVALID_FIELD", "model activity role is invalid");
+      }
+      if (typeof message.content !== "string" || message.content.length > 64 * 1024) {
+        throw new ProtocolError("INVALID_FIELD", "model activity content is invalid");
+      }
+    }
   }
   if (kind === "initialized" && value.protocol !== PROTOCOL_VERSION) throw new ProtocolError("VERSION_MISMATCH", "protocol version is incompatible");
   return value as unknown as IpcMessage;

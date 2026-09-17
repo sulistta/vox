@@ -49,7 +49,15 @@ VOX_AGENT_ENTRY="$PWD/packages/agent-core/dist/main.js" \
   ./target/debug/vox-desktop
 ```
 
-`VOX_PROVIDER=fake` é o padrão seguro e textual. Um endpoint OpenAI-compatible exige explicitamente `VOX_PROVIDER_BASE_URL` e `VOX_PROVIDER_MODEL`; `VOX_PROVIDER_API_KEY` fica somente no processo e nunca é impresso.
+`VOX_PROVIDER=fake` é o padrão seguro e textual: ele responde à conversa, mas não propõe nem executa ferramentas. Para testar a fixture determinística de ferramentas, use somente em testes `VOX_PROVIDER=fake-tools`. Um endpoint OpenAI-compatible exige `VOX_PROVIDER=openai-compatible`, `VOX_PROVIDER_BASE_URL` e `VOX_PROVIDER_MODEL`; `VOX_PROVIDER_API_KEY` fica somente no processo e nunca é impresso. Pela janela, salvar endpoint e modelo em Preferências ativa esse provider no próximo core privado ocioso.
+
+Para verificar uma conta OpenAI-compatible configurada no ambiente, após
+`pnpm build` rode `pnpm smoke:provider`; para testar cancelamento, rode
+`VOX_PROVIDER_SMOKE_MODE=cancel pnpm smoke:provider`. O script exige que
+`VOX_PROVIDER_BASE_URL`, `VOX_PROVIDER_MODEL` e `VOX_PROVIDER_API_KEY` já
+estejam disponíveis no processo. Ele bloqueia todas as tools, não espelha
+payload/resposta/stderr e imprime somente um resumo redigido. Não salve a chave
+em `.env` versionado, SQLite ou na linha de comando.
 
 Para usar o keyring no Linux, configure `VOX_PROVIDER_ACCOUNT` ou informe a
 conta em Preferências e grave a chave pelo botão explícito. Endpoint e modelo
@@ -64,10 +72,34 @@ matriz CI e nas máquinas de referência.
 
 `VOX_XA11Y_BIN` pode apontar para um binário xa11y apenas como fallback operacional. A ferramenta de janelas tenta primeiro o adapter Rust nativo; se a ponte de acessibilidade não estiver disponível, o resultado é uma falha factual e recuperável, não uma fixture apresentada como observação real.
 
+No Linux, a árvore da própria janela egui é publicada pelo AccessKit quando o
+serviço de leitor de tela do sistema está ativo (`org.a11y.Status`
+`ScreenReaderEnabled`). Isso evita expor a árvore continuamente em uma sessão
+sem acessibilidade em uso. O smoke real não muda essa preferência; com uma
+sessão já ativa, execute
+`VOX_TEST_A11Y=1 cargo test -p vox-desktop --test native_accessibility -- --ignored --nocapture`
+para verificar labels, menu e Preferências da janela Vox.
+
+Em **Preferências → Pastas permitidas**, informe uma pasta por linha. O
+runtime canoniza essas pastas e rejeita caminhos, traversal e symlinks que
+saiam delas. Na primeira execução, a lista usa Desktop, Documents, Downloads e
+o checkout atual quando ele estiver dentro da pasta pessoal; ela nunca libera
+a pasta pessoal inteira. A alteração fica salva no SQLite e só troca o broker
+depois que a tarefa em andamento termina, para que uma operação não mude de
+escopo no meio da execução.
+
 O histórico usa SQLite persistente no diretório de dados da plataforma. Para
 um smoke isolado, defina `VOX_DATA_DIR` para um diretório temporário; as
 migrações não reconstroem approvals antigos e a exportação redige valores com
-aparência de segredo.
+aparência de segredo. O schema v4 guarda o rascunho separadamente por sessão,
+redige-o antes da escrita, restaura a última sessão válida no próximo início e
+o exclui da exportação. O backup SQLite pode conter apenas a versão já
+redigida do rascunho.
+
+Resultados de ferramentas concluídas também são persistidos como contexto
+interno redigido, sem aparecer como bolhas da conversa. Isso permite que o
+turno seguinte recupere uma observação ou efeito anterior; a numeração do
+histórico vem do SQLite, e não da quantidade de bolhas visíveis.
 
 ## Limites atuais
 

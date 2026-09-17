@@ -11,6 +11,7 @@ egui.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 vox-broker = { path = "../../crates/broker" }
+vox-audio-capture = { path = "../../crates/audio-capture" }
 vox-desktop-access = { path = "../../crates/desktop-access" }
 vox-policy = { path = "../../crates/policy" }
 vox-session-store = { path = "../../crates/session-store" }
