@@ -3,6 +3,7 @@ mod voice_capability;
 
 use eframe::egui;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,12 +16,118 @@ use uuid::Uuid;
 use voice_capability::VoiceCapability;
 use vox_broker::{Broker, BrokerCall};
 use vox_secrets::{SecretError, SecretStore};
-use vox_session_store::{ApprovalRecord, EffectRecord, SessionStore};
+use vox_session_store::{EffectRecord, SessionStore, TaskGrantRecord};
 use vox_supervisor::{default_entry, default_node, AgentSupervisor};
 use vox_tool_runtime::RuntimeConfig;
 
-fn provider_is_configured(base_url: &str, model: &str) -> bool {
+fn text_is_configured(base_url: &str, model: &str) -> bool {
     !base_url.trim().is_empty() && !model.trim().is_empty()
+}
+
+/// The explicit task starts with a small, inspectable tool scope. The broker
+/// still checks roots, snapshot references and observed identities at call
+/// time; this list prevents an unrelated candidate from widening the task.
+fn task_grant_tools(request: &str) -> Vec<String> {
+    let request = request.to_lowercase();
+    let has = |terms: &[&str]| terms.iter().any(|term| request.contains(term));
+    let mut tools = vec![
+        "desktop.list_windows",
+        "desktop.snapshot",
+        "desktop.query",
+        "desktop.wait_for",
+        "apps.resolve",
+    ];
+    if has(&["abrir", "abra", "open", "iniciar", "inicie", "launch"]) {
+        tools.push("apps.launch");
+    }
+    if has(&[
+        "clic", "digite", "digitar", "mensagem", "enviar", "mande", "preencha", "discord",
+    ]) {
+        tools.push("desktop.act");
+    }
+    if has(&[
+        "arquivo",
+        "arquivos",
+        "pasta",
+        "diretório",
+        "diretorio",
+        "documento",
+    ]) {
+        tools.extend(["files.list", "files.search", "files.read"]);
+    }
+    if has(&[
+        "crie arquivo",
+        "criar arquivo",
+        "salve",
+        "escreva arquivo",
+        "edite arquivo",
+        "mova arquivo",
+    ]) {
+        tools.extend(["files.write", "files.move", "paths.open"]);
+    }
+    if has(&[
+        "área de transferência",
+        "area de transferencia",
+        "clipboard",
+        "copie",
+        "colar",
+    ]) {
+        tools.extend(["clipboard.read", "clipboard.write"]);
+    }
+    if has(&[
+        "processo",
+        "programa",
+        "encerrar",
+        "fechar processo",
+        "terminate",
+    ]) {
+        tools.push("process.list");
+    }
+    if has(&["encerrar", "fechar processo", "terminate"]) {
+        tools.push("process.terminate");
+    }
+    if has(&["terminal", "comando", "shell", "execute ", "executar "]) {
+        tools.push("shell.exec");
+    }
+    tools.sort_unstable();
+    tools.dedup();
+    tools.into_iter().map(str::to_owned).collect()
+}
+
+#[cfg(test)]
+mod task_grant_tests {
+    use super::*;
+
+    #[test]
+    fn active_ui_requires_both_services_and_uses_the_new_environment_names() {
+        assert_eq!(
+            model_label(true, "text-model", true),
+            "Jev decide · text-model"
+        );
+        assert!(model_label(false, "", true).contains("Configuração incompleta"));
+        assert!(
+            text_core_environment("https://text.example/v1", "text-model")
+                .contains(&("VOX_TEXT_MODEL".into(), "text-model".into()))
+        );
+        assert!(agent_core_environment("jev-latest")
+            .contains(&("VOX_AGENT_MODEL".into(), "jev-latest".into())));
+    }
+
+    #[test]
+    fn composer_waits_only_for_the_active_run() {
+        let mut view = PresentationState::default();
+        assert!(draft_submission_allowed(&view));
+        view.submit("tarefa", "run");
+        assert!(!draft_submission_allowed(&view));
+    }
+
+    #[test]
+    fn task_grant_scope_allows_the_explicit_discord_journey_but_not_shell() {
+        let tools = task_grant_tools("abra o Discord e envie uma mensagem para Tony");
+        assert!(tools.contains(&"apps.launch".into()));
+        assert!(tools.contains(&"desktop.act".into()));
+        assert!(!tools.contains(&"shell.exec".into()));
+    }
 }
 
 /// Endpoint, model and keyring-account fields are configuration metadata, not
@@ -46,18 +153,18 @@ fn provider_keyring_error_message(error: &SecretError) -> String {
     }
 }
 
-fn provider_keyring_environment(
+fn text_keyring_environment(
     configured_account: &str,
     provider_is_configured: bool,
 ) -> Vec<(String, String)> {
     if !provider_is_configured || provider_configuration_contains_secret(configured_account) {
         return Vec::new();
     }
-    if std::env::var("VOX_PROVIDER_API_KEY").is_ok_and(|key| !key.trim().is_empty()) {
+    if std::env::var("VOX_TEXT_API_KEY").is_ok_and(|key| !key.trim().is_empty()) {
         return Vec::new();
     }
     let account = if configured_account.trim().is_empty() {
-        std::env::var_os("VOX_PROVIDER_ACCOUNT")
+        std::env::var_os("VOX_TEXT_ACCOUNT")
     } else {
         Some(configured_account.into())
     };
@@ -65,27 +172,123 @@ fn provider_keyring_environment(
         return Vec::new();
     };
     let account = account.to_string_lossy();
-    match SecretStore::native("vox").get(&account) {
-        Ok(Some(secret)) => vec![("VOX_PROVIDER_API_KEY".into(), secret)],
+    match SecretStore::native("vox-text").get(&account) {
+        Ok(Some(secret)) => vec![("VOX_TEXT_API_KEY".into(), secret)],
         Ok(None) | Err(_) => Vec::new(),
     }
 }
 
-fn provider_core_environment(base_url: &str, model: &str) -> Vec<(String, String)> {
-    if !provider_is_configured(base_url, model) || !provider_configuration_is_safe(base_url, model)
-    {
-        // Explicitly override an inherited provider credential/configuration
-        // so a plain desktop launch stays in the non-effectful demo mode.
-        return vec![
-            ("VOX_PROVIDER".into(), "fake".into()),
-            ("VOX_PROVIDER_API_KEY".into(), String::new()),
-        ];
+fn agent_is_configured(model: &str) -> bool {
+    !model.trim().is_empty() && !provider_configuration_contains_secret(model)
+}
+
+fn agent_keyring_environment(
+    configured_account: &str,
+    agent_is_configured: bool,
+) -> Vec<(String, String)> {
+    if !agent_is_configured || provider_configuration_contains_secret(configured_account) {
+        return Vec::new();
     }
+    if std::env::var("VOX_AGENT_API_KEY").is_ok_and(|key| !key.trim().is_empty()) {
+        return Vec::new();
+    }
+    let account = if configured_account.trim().is_empty() {
+        std::env::var_os("VOX_AGENT_ACCOUNT")
+    } else {
+        Some(configured_account.into())
+    };
+    let Some(account) = account else {
+        return Vec::new();
+    };
+    let account = account.to_string_lossy();
+    match SecretStore::native("vox-agent").get(&account) {
+        Ok(Some(secret)) => vec![("VOX_AGENT_API_KEY".into(), secret)],
+        Ok(None) | Err(_) => Vec::new(),
+    }
+}
+
+fn text_core_environment(base_url: &str, model: &str) -> Vec<(String, String)> {
     vec![
-        ("VOX_PROVIDER".into(), "openai-compatible".into()),
-        ("VOX_PROVIDER_BASE_URL".into(), base_url.to_owned()),
-        ("VOX_PROVIDER_MODEL".into(), model.to_owned()),
+        ("VOX_TEXT_BASE_URL".into(), base_url.to_owned()),
+        ("VOX_TEXT_MODEL".into(), model.to_owned()),
     ]
+}
+
+fn agent_core_environment(model: &str) -> Vec<(String, String)> {
+    vec![("VOX_AGENT_MODEL".into(), model.trim().to_owned())]
+}
+
+fn model_label(text_configured: bool, text_model: &str, agent_configured: bool) -> String {
+    if text_configured && agent_configured {
+        format!("Jev decide · {}", text_model.trim())
+    } else {
+        "Configuração incompleta · Jev e texto são obrigatórios".into()
+    }
+}
+
+/// Move the old configuration once, including keyring values. The old secret
+/// is deleted only after the destination keyring confirms its write.
+fn migrate_provider_configuration(store: &SessionStore) -> Result<(), String> {
+    if store
+        .preference("configuration_migrated_v6")
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        == Some("true")
+    {
+        return Ok(());
+    }
+    for (old, new) in [
+        ("provider_base_url", "text_base_url"),
+        ("provider_model", "text_model"),
+        ("provider_account", "text_account"),
+        ("jev_model", "agent_model"),
+        ("jev_account", "agent_account"),
+    ] {
+        if store
+            .preference(new)
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            if let Some(value) = store.preference(old).map_err(|error| error.to_string())? {
+                store
+                    .set_preference(new, &value, 1)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    for (old_service, new_service, old_account_key, new_account_key) in [
+        ("vox", "vox-text", "provider_account", "text_account"),
+        ("vox-jev", "vox-agent", "jev_account", "agent_account"),
+    ] {
+        let account = store
+            .preference(new_account_key)
+            .map_err(|error| error.to_string())?
+            .or_else(|| store.preference(old_account_key).ok().flatten());
+        let Some(account) = account.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let source = SecretStore::native(old_service);
+        if let Some(secret) = source.get(&account).map_err(|error| error.to_string())? {
+            SecretStore::native(new_service)
+                .set(&account, &secret)
+                .map_err(|error| error.to_string())?;
+            source.delete(&account).map_err(|error| error.to_string())?;
+        }
+    }
+    for key in [
+        "provider_base_url",
+        "provider_model",
+        "provider_account",
+        "jev_model",
+        "jev_account",
+    ] {
+        store
+            .delete_preference(key)
+            .map_err(|error| error.to_string())?;
+    }
+    store
+        .set_preference("configuration_migrated_v6", "true", 1)
+        .map_err(|error| error.to_string())
 }
 
 const ALLOWED_ROOTS_PREFERENCE: &str = "allowed_roots";
@@ -478,35 +681,11 @@ fn redacted_value_for_display(value: &Value) -> Value {
     }
 }
 
-/// Approval controls state the irreversible effect in their accessible label
-/// instead of asking the person to map a generic “Autorizar” to a detail box.
-fn approval_decision_labels(call: &BrokerCall) -> (&'static str, &'static str) {
-    match call.tool.as_str() {
-        "files.write" if call.arguments.get("overwrite").and_then(Value::as_bool) == Some(true) => {
-            ("Substituir arquivo", "Cancelar alteração")
-        }
-        "files.write" => ("Gravar arquivo", "Cancelar alteração"),
-        "files.move" => ("Mover arquivo", "Cancelar movimentação"),
-        "clipboard.write" => ("Alterar área de transferência", "Cancelar alteração"),
-        "process.terminate" => ("Encerrar processo", "Cancelar encerramento"),
-        "apps.launch" => ("Abrir aplicativo", "Cancelar abertura"),
-        "paths.open" => ("Abrir item", "Cancelar abertura"),
-        "shell.exec" => ("Executar comando", "Cancelar comando"),
-        "desktop.act" => ("Executar ação", "Cancelar ação"),
-        _ => ("Autorizar ação", "Cancelar ação"),
-    }
-}
-
-/// A queued approval has priority over the composer. This also protects the
-/// small edge where an Enter event arrives in the same frame as the approval.
-fn draft_submission_allowed(view: &PresentationState, approval_pending: bool) -> bool {
-    view.active_run.is_none() && view.mode != WindowMode::Approval && !approval_pending
+fn draft_submission_allowed(view: &PresentationState) -> bool {
+    view.active_run.is_none()
 }
 
 /// A single broker worker keeps tool execution off eframe's UI thread.  The
-/// broker itself remains shared so short, in-memory policy operations (issuing
-/// or revoking an approval) can stay synchronous with the user's click.
-///
 /// Each queued execution carries its own cancellation flag.  The UI can set
 /// that flag immediately without waiting for the worker to receive another
 /// command; cancellable runtimes observe it while they are running.
@@ -604,14 +783,6 @@ impl BrokerWorker {
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
     }
-
-    #[cfg(test)]
-    fn recv_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<BrokerWorkerResult, mpsc::RecvTimeoutError> {
-        self.results.recv_timeout(timeout)
-    }
 }
 
 struct VoxApp {
@@ -634,9 +805,8 @@ struct VoxApp {
     history_offset: usize,
     window_level_applied: bool,
     last_viewport_mode: WindowMode,
-    pending_approval: Option<BrokerCall>,
-    pending_approval_summary: Option<String>,
     active_store_run: Option<String>,
+    active_task_grant: Option<String>,
     draft_persist_pending: bool,
     last_draft_change: Option<Instant>,
     last_heartbeat_sent: Instant,
@@ -649,6 +819,10 @@ struct VoxApp {
     provider_endpoint_input: String,
     provider_model_input: String,
     provider_keyring_status: Option<String>,
+    jev_account: String,
+    jev_secret_input: String,
+    jev_model_input: String,
+    jev_keyring_status: Option<String>,
     file_roots_input: String,
     file_roots_status: Option<String>,
     pending_runtime_config: Option<RuntimeConfig>,
@@ -663,6 +837,13 @@ impl VoxApp {
         let provisional_session_id = Uuid::new_v4().to_string();
         let lease_candidate = Uuid::new_v4().to_string();
         let (store, mut storage_warning) = persistent_store(&lease_candidate);
+        if let Some(store) = store.as_ref() {
+            if let Err(error) = migrate_provider_configuration(store) {
+                storage_warning = Some(format!(
+                    "A migração da configuração não foi concluída: {error}"
+                ));
+            }
+        }
         let desktop_lease_owner = store.as_ref().map(|_| lease_candidate);
         let can_start_core = renew_execution_lease(store.as_ref(), desktop_lease_owner.as_deref());
         let keep_on_top = store
@@ -690,19 +871,29 @@ impl VoxApp {
             .unwrap_or(0);
         let mut provider_account = store
             .as_ref()
-            .and_then(|store| store.preference("provider_account").ok().flatten())
-            .or_else(|| std::env::var("VOX_PROVIDER_ACCOUNT").ok())
+            .and_then(|store| store.preference("text_account").ok().flatten())
+            .or_else(|| std::env::var("VOX_TEXT_ACCOUNT").ok())
             .unwrap_or_default();
         let mut provider_endpoint_input = store
             .as_ref()
-            .and_then(|store| store.preference("provider_base_url").ok().flatten())
-            .or_else(|| std::env::var("VOX_PROVIDER_BASE_URL").ok())
+            .and_then(|store| store.preference("text_base_url").ok().flatten())
+            .or_else(|| std::env::var("VOX_TEXT_BASE_URL").ok())
             .unwrap_or_default();
         let mut provider_model_input = store
             .as_ref()
-            .and_then(|store| store.preference("provider_model").ok().flatten())
-            .or_else(|| std::env::var("VOX_PROVIDER_MODEL").ok())
+            .and_then(|store| store.preference("text_model").ok().flatten())
+            .or_else(|| std::env::var("VOX_TEXT_MODEL").ok())
             .unwrap_or_default();
+        let mut jev_account = store
+            .as_ref()
+            .and_then(|store| store.preference("agent_account").ok().flatten())
+            .or_else(|| std::env::var("VOX_AGENT_ACCOUNT").ok())
+            .unwrap_or_default();
+        let mut jev_model_input = store
+            .as_ref()
+            .and_then(|store| store.preference("agent_model").ok().flatten())
+            .or_else(|| std::env::var("VOX_AGENT_MODEL").ok())
+            .unwrap_or_else(|| "jev-latest".into());
         if provider_configuration_contains_secret(&provider_account) {
             provider_account.clear();
             storage_warning =
@@ -714,21 +905,35 @@ impl VoxApp {
             storage_warning =
                 Some("A configuração do provider continha uma credencial e não foi usada.".into());
         }
+        if provider_configuration_contains_secret(&jev_account) {
+            jev_account.clear();
+            storage_warning =
+                Some("A conta do Jev continha uma credencial e não foi usada.".into());
+        }
+        if provider_configuration_contains_secret(&jev_model_input) {
+            jev_model_input.clear();
+            storage_warning =
+                Some("A configuração do Jev continha uma credencial e não foi usada.".into());
+        }
         let provider_is_configured =
-            provider_is_configured(&provider_endpoint_input, &provider_model_input)
+            text_is_configured(&provider_endpoint_input, &provider_model_input)
                 && provider_configuration_is_safe(&provider_endpoint_input, &provider_model_input);
-        let model_label = if provider_is_configured {
-            format!(
-                "Provider configurado · {}",
-                if provider_model_input.trim().is_empty() {
-                    "modelo não informado".into()
-                } else {
-                    provider_model_input.clone()
-                }
-            )
-        } else {
-            "Demonstração local · ferramentas desativadas".into()
-        };
+        let text_credential_available = std::env::var("VOX_TEXT_API_KEY")
+            .is_ok_and(|key| !key.trim().is_empty())
+            || text_keyring_environment(&provider_account, provider_is_configured)
+                .iter()
+                .any(|(key, value)| key == "VOX_TEXT_API_KEY" && !value.trim().is_empty());
+        let agent_configured = agent_is_configured(&jev_model_input);
+        let agent_credential_available = std::env::var("VOX_AGENT_API_KEY")
+            .is_ok_and(|key| !key.trim().is_empty())
+            || agent_keyring_environment(&jev_account, agent_configured)
+                .iter()
+                .any(|(key, value)| key == "VOX_AGENT_API_KEY" && !value.trim().is_empty());
+        let model_label = model_label(
+            provider_is_configured && text_credential_available,
+            &provider_model_input,
+            agent_configured && agent_credential_available,
+        );
         let restored_session_id = if can_start_core {
             store.as_ref().and_then(|store| {
                 let session_id = store
@@ -761,11 +966,14 @@ impl VoxApp {
         }
         let runtime_config = runtime_config_for_roots(allowed_roots);
         let mut core_environment =
-            provider_core_environment(&provider_endpoint_input, &provider_model_input);
-        core_environment.extend(provider_keyring_environment(
+            text_core_environment(&provider_endpoint_input, &provider_model_input);
+        core_environment.extend(text_keyring_environment(
             &provider_account,
             provider_is_configured,
         ));
+        let jev_configured = agent_configured;
+        core_environment.extend(agent_core_environment(&jev_model_input));
+        core_environment.extend(agent_keyring_environment(&jev_account, jev_configured));
         let broker = Arc::new(Broker::new(runtime_config));
         let broker_worker = BrokerWorker::spawn(Arc::clone(&broker));
         let mut app = Self {
@@ -788,9 +996,8 @@ impl VoxApp {
             history_offset: 0,
             window_level_applied: false,
             last_viewport_mode: WindowMode::Invocation,
-            pending_approval: None,
-            pending_approval_summary: None,
             active_store_run: None,
+            active_task_grant: None,
             draft_persist_pending: false,
             last_draft_change: None,
             last_heartbeat_sent: Instant::now(),
@@ -803,6 +1010,10 @@ impl VoxApp {
             provider_endpoint_input,
             provider_model_input,
             provider_keyring_status: None,
+            jev_account,
+            jev_secret_input: String::new(),
+            jev_model_input,
+            jev_keyring_status: None,
             file_roots_input,
             file_roots_status: None,
             pending_runtime_config: None,
@@ -882,9 +1093,7 @@ impl VoxApp {
         }
         let (size, minimum_size) = match self.view.mode {
             WindowMode::Invocation => (INVOCATION_VIEWPORT_SIZE, NORMAL_MIN_INNER_SIZE),
-            WindowMode::Conversation | WindowMode::Approval => {
-                (CONVERSATION_VIEWPORT_SIZE, NORMAL_MIN_INNER_SIZE)
-            }
+            WindowMode::Conversation => (CONVERSATION_VIEWPORT_SIZE, NORMAL_MIN_INNER_SIZE),
             WindowMode::Compact => (COMPACT_VIEWPORT_SIZE, COMPACT_MIN_INNER_SIZE),
         };
         // The compact accompaniment intentionally has a smaller minimum than
@@ -982,14 +1191,17 @@ impl VoxApp {
 
     fn send(&mut self) {
         let content = self.view.draft.trim().to_owned();
-        if content.is_empty()
-            || !draft_submission_allowed(&self.view, self.pending_approval.is_some())
-            || !self.view.connected
-        {
+        if content.is_empty() || !draft_submission_allowed(&self.view) || !self.view.connected {
             return;
         }
         if self.active_broker_execution.is_some() {
             self.view.status = "aguardando a interrupção da ação anterior".into();
+            return;
+        }
+        if !self.services_ready() {
+            self.view.fail(
+                "configuração incompleta: salve uma chave para Agente Jev e outra para Texto e planejamento",
+            );
             return;
         }
         if !self.require_execution_storage() {
@@ -1016,14 +1228,45 @@ impl VoxApp {
             // Durable preparation failed (storage gone, lease lost or the
             // session already has a run): nothing was committed and nothing
             // may be sent to the core.
-            self.view.fail("tarefa não enviada; o histórico local não confirmou esta conversa");
+            self.view
+                .fail("tarefa não enviada; o histórico local não confirmou esta conversa");
             return;
         };
         // The journal, UI and IPC share this ID. Nothing leaves the process
         // until both the user message and run have committed successfully.
         let run_id = run.id;
+        let request_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let grant =
+            self.broker
+                .begin_task_grant(&run_id, &request_hash, task_grant_tools(&content));
+        if let Some(store) = self.store.as_ref() {
+            let record = TaskGrantRecord {
+                id: grant.id.clone(),
+                run_id: run_id.clone(),
+                request_hash,
+                expires_at: grant.expires_at,
+                state: "active".into(),
+                limits: format!(
+                    "tools={}; observed apps/processes; current snapshots; configured roots",
+                    grant
+                        .allowed_tools
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            };
+            if let Err(error) = store.record_task_grant(&record) {
+                self.broker.finish_task_grant(&grant.id);
+                let _ = store.finish_run(&run_id, "failed");
+                self.view.fail(format!("tarefa não enviada; não foi possível registrar a autorização da tarefa: {error}"));
+                return;
+            }
+        }
         self.active_store_run = Some(run_id.clone());
-        self.view.submit(redact_activity_text(&content), run_id.clone());
+        self.active_task_grant = Some(grant.id.clone());
+        self.view
+            .submit(redact_activity_text(&content), run_id.clone());
         let context: Vec<Value> = messages
             .into_iter()
             .map(|message| serde_json::json!({ "role": message.role, "content": message.content }))
@@ -1032,10 +1275,17 @@ impl VoxApp {
             &Uuid::new_v4().to_string(),
             &self.session_id,
             &run_id,
+            &grant.id,
             &content,
             "text",
             &context,
         ) {
+            self.broker.finish_task_grant(&grant.id);
+            if let Some(store) = self.store.as_ref() {
+                let _ = store.set_task_grant_state(&grant.id, "failed");
+                let _ = store.finish_run(&run_id, "failed");
+            }
+            self.active_task_grant = None;
             self.view.withdraw_submission_for(&run_id);
             self.view
                 .fail(redact_activity_text(&format!("falha ao enviar: {error}")));
@@ -1244,7 +1494,7 @@ impl VoxApp {
             return;
         }
         if let Some(store) = self.store.as_ref() {
-            let _ = store.set_preference("provider_account", &account, 1);
+            let _ = store.set_preference("text_account", &account, 1);
         }
         self.provider_account = account.clone();
         if self.provider_secret_input.is_empty() {
@@ -1257,7 +1507,7 @@ impl VoxApp {
             });
             return;
         }
-        match SecretStore::native("vox").set(&account, &self.provider_secret_input) {
+        match SecretStore::native("vox-text").set(&account, &self.provider_secret_input) {
             Ok(()) => {
                 self.provider_secret_input.clear();
                 self.refresh_core_environment();
@@ -1289,8 +1539,8 @@ impl VoxApp {
             return;
         }
         if let Some(store) = self.store.as_ref() {
-            let _ = store.set_preference("provider_base_url", &endpoint, 1);
-            let _ = store.set_preference("provider_model", &model, 1);
+            let _ = store.set_preference("text_base_url", &endpoint, 1);
+            let _ = store.set_preference("text_model", &model, 1);
         }
         self.refresh_core_environment();
         let applied = self.restart_core_for_configuration();
@@ -1301,28 +1551,172 @@ impl VoxApp {
         });
     }
 
+    fn save_jev_credential(&mut self) {
+        let account = self.jev_account.trim().to_owned();
+        if account.is_empty() {
+            self.jev_keyring_status = Some("Informe uma conta para o keyring do Jev.".into());
+            return;
+        }
+        if provider_configuration_contains_secret(&account) {
+            self.jev_account.clear();
+            self.jev_keyring_status =
+                Some("A conta não foi salva porque parece conter uma credencial.".into());
+            return;
+        }
+        if let Some(store) = self.store.as_ref() {
+            let _ = store.set_preference("agent_account", &account, 1);
+        }
+        self.jev_account = account.clone();
+        if self.jev_secret_input.is_empty() {
+            self.refresh_core_environment();
+            let applied = self.restart_core_for_configuration();
+            self.jev_keyring_status = Some(if applied {
+                "Conta do Jev salva; nenhuma nova chave foi gravada. A configuração foi aplicada ao core ocioso.".into()
+            } else {
+                "Conta do Jev salva; a configuração será aplicada quando a tarefa atual terminar."
+                    .into()
+            });
+            return;
+        }
+        match SecretStore::native("vox-agent").set(&account, &self.jev_secret_input) {
+            Ok(()) => {
+                self.jev_secret_input.clear();
+                self.refresh_core_environment();
+                let applied = self.restart_core_for_configuration();
+                self.jev_keyring_status = Some(if applied {
+                    "Chave do Jev salva no keyring; a configuração foi aplicada ao core ocioso."
+                        .into()
+                } else {
+                    "Chave do Jev salva no keyring; a configuração será aplicada quando a tarefa atual terminar.".into()
+                });
+            }
+            Err(error) => {
+                self.jev_keyring_status = Some(provider_keyring_error_message(&error));
+            }
+        }
+    }
+
+    fn save_jev_settings(&mut self) {
+        let model = self.jev_model_input.trim().to_owned();
+        if provider_configuration_contains_secret(&model) {
+            self.jev_model_input.clear();
+            self.jev_keyring_status = Some(
+                "A configuração do Jev não foi salva porque parece conter uma credencial.".into(),
+            );
+            return;
+        }
+        if model.is_empty() {
+            self.jev_keyring_status = Some("Informe o modelo Jev antes de ativá-lo.".into());
+            return;
+        }
+        if let Some(store) = self.store.as_ref() {
+            let _ = store.set_preference("agent_model", &model, 1);
+        }
+        self.jev_model_input = model;
+        self.refresh_core_environment();
+        let applied = self.restart_core_for_configuration();
+        self.jev_keyring_status = Some(if applied {
+            "Configuração do Jev salva e aplicada ao core ocioso.".into()
+        } else {
+            "Configuração do Jev salva; ela será aplicada quando a tarefa atual terminar.".into()
+        });
+    }
+
+    fn test_jev_connection(&mut self) {
+        if !agent_is_configured(&self.jev_model_input) || !self.agent_credential_available() {
+            self.jev_keyring_status =
+                Some("Salve o modelo e a chave do Jev antes do teste.".into());
+            return;
+        }
+        let Some(supervisor) = self.supervisor.as_ref() else {
+            self.jev_keyring_status = Some("Core indisponível para testar o Jev.".into());
+            return;
+        };
+        let request_id = format!("jev-probe:{}", Uuid::new_v4());
+        match supervisor.send(&serde_json::json!({
+            "type": "heartbeat",
+            "request_id": request_id,
+            "agent_probe": true,
+        })) {
+            Ok(()) => self.jev_keyring_status = Some("Testando a conexão direta com o Jev…".into()),
+            Err(error) => {
+                self.jev_keyring_status =
+                    Some(format!("Não foi possível iniciar o teste do Jev: {error}"));
+            }
+        }
+    }
+
+    fn test_text_connection(&mut self) {
+        if !self.provider_is_configured || !self.text_credential_available() {
+            self.provider_keyring_status =
+                Some("Salve endpoint, modelo e chave de texto antes do teste.".into());
+            return;
+        }
+        let Some(supervisor) = self.supervisor.as_ref() else {
+            self.provider_keyring_status = Some("Core indisponível para testar o texto.".into());
+            return;
+        };
+        let request_id = format!("text-probe:{}", Uuid::new_v4());
+        match supervisor.send(&serde_json::json!({
+            "type": "heartbeat",
+            "request_id": request_id,
+            "text_probe": true,
+        })) {
+            Ok(()) => self.provider_keyring_status = Some("Testando a conexão de texto…".into()),
+            Err(error) => {
+                self.provider_keyring_status = Some(format!(
+                    "Não foi possível iniciar o teste de texto: {error}"
+                ))
+            }
+        }
+    }
+
+    fn text_credential_available(&self) -> bool {
+        std::env::var("VOX_TEXT_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            || text_keyring_environment(&self.provider_account, self.provider_is_configured)
+                .iter()
+                .any(|(key, value)| key == "VOX_TEXT_API_KEY" && !value.trim().is_empty())
+    }
+
+    fn agent_credential_available(&self) -> bool {
+        std::env::var("VOX_AGENT_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            || agent_keyring_environment(
+                &self.jev_account,
+                agent_is_configured(&self.jev_model_input),
+            )
+            .iter()
+            .any(|(key, value)| key == "VOX_AGENT_API_KEY" && !value.trim().is_empty())
+    }
+
+    fn services_ready(&self) -> bool {
+        self.provider_is_configured
+            && agent_is_configured(&self.jev_model_input)
+            && self.text_credential_available()
+            && self.agent_credential_available()
+    }
+
     fn refresh_core_environment(&mut self) {
         self.provider_is_configured =
-            provider_is_configured(&self.provider_endpoint_input, &self.provider_model_input)
+            text_is_configured(&self.provider_endpoint_input, &self.provider_model_input)
                 && provider_configuration_is_safe(
                     &self.provider_endpoint_input,
                     &self.provider_model_input,
                 );
         let mut environment =
-            provider_core_environment(&self.provider_endpoint_input, &self.provider_model_input);
-        environment.extend(provider_keyring_environment(
+            text_core_environment(&self.provider_endpoint_input, &self.provider_model_input);
+        environment.extend(text_keyring_environment(
             &self.provider_account,
             self.provider_is_configured,
         ));
+        let jev_configured = agent_is_configured(&self.jev_model_input);
+        environment.extend(agent_core_environment(&self.jev_model_input));
+        environment.extend(agent_keyring_environment(&self.jev_account, jev_configured));
         self.core_environment = environment;
-        self.view.model_label = if self.provider_is_configured {
-            format!(
-                "Provider configurado · {}",
-                self.provider_model_input.trim()
-            )
-        } else {
-            "Demonstração local · ferramentas desativadas".into()
-        };
+        self.view.model_label = model_label(
+            self.provider_is_configured && self.text_credential_available(),
+            &self.provider_model_input,
+            jev_configured && self.agent_credential_available(),
+        );
     }
 
     fn replace_broker_runtime(&mut self, runtime_config: RuntimeConfig) {
@@ -1330,7 +1724,6 @@ impl VoxApp {
         // worker therefore cannot move a tool from one file scope to another
         // halfway through an operation. Dropping the old sender lets an idle
         // worker exit after it has observed the closed channel.
-        self.revoke_pending_approval("invalidated");
         let broker = Arc::new(Broker::new(runtime_config));
         self.broker_worker = BrokerWorker::spawn(Arc::clone(&broker));
         self.broker = broker;
@@ -1369,13 +1762,11 @@ impl VoxApp {
         if let (Some(store), Some(run_id)) = (self.store.as_ref(), self.active_store_run.take()) {
             let _ = store.finish_run(&run_id, state);
         }
-    }
-
-    fn record_approval_state(&self, call: &BrokerCall, state: &str) {
-        if let (Some(store), Some(approval_id)) =
-            (self.store.as_ref(), call.authorization_ref.as_deref())
-        {
-            let _ = store.set_approval_state(approval_id, state);
+        if let Some(grant_id) = self.active_task_grant.take() {
+            if let Some(store) = self.store.as_ref() {
+                let _ = store.set_task_grant_state(&grant_id, state);
+            }
+            self.broker.finish_task_grant(&grant_id);
         }
     }
 
@@ -1501,26 +1892,9 @@ impl VoxApp {
     }
 
     fn cancel_broker_execution_for(&mut self, run_id: &str) {
-        let approval_call = self.active_broker_execution.as_ref().and_then(|execution| {
+        if let Some(execution) = self.active_broker_execution.as_ref() {
             if execution.call.run_id == run_id {
                 execution.cancel.store(true, Ordering::Relaxed);
-                execution
-                    .call
-                    .authorization_ref
-                    .as_ref()
-                    .map(|_| execution.call.clone())
-            } else {
-                None
-            }
-        });
-        if let Some(call) = approval_call {
-            if let Some(approval_id) = call.authorization_ref.as_deref() {
-                // If authorization won the race, execute_with_cancel will
-                // receive the cancellation flag; otherwise this prevents a
-                // queued approval from ever crossing the effect boundary.
-                if self.broker.revoke_approval(approval_id).is_ok() {
-                    self.record_approval_state(&call, "cancelled");
-                }
             }
         }
     }
@@ -1551,12 +1925,7 @@ impl VoxApp {
         }
     }
 
-    fn finish_cancelled_broker_execution(
-        &mut self,
-        call: &BrokerCall,
-        run_is_active: bool,
-        approval_was_consumed: bool,
-    ) {
+    fn finish_cancelled_broker_execution(&mut self, call: &BrokerCall, run_is_active: bool) {
         let data = Value::Null;
         let result = ToolResult {
             status: "cancelled",
@@ -1567,9 +1936,6 @@ impl VoxApp {
             error: Some("a execução foi interrompida depois de iniciar"),
         };
         self.complete_effect(call, &result);
-        if approval_was_consumed {
-            self.record_approval_state(call, "consumed");
-        }
         if run_is_active {
             self.view.status = "ação interrompida; verificando cancelamento".into();
         }
@@ -1583,82 +1949,11 @@ impl VoxApp {
         if !matches_active {
             return;
         }
-        let active = self
-            .active_broker_execution
-            .take()
-            .expect("matching broker execution must exist");
+        self.active_broker_execution.take();
         let call = outcome.call;
         let run_is_active = self.view.active_run.as_deref() == Some(call.run_id.as_str());
-
         match outcome.result {
-            Ok(result) if result.error_code.as_deref() == Some("APPROVAL_REQUIRED") => {
-                if outcome.cancel_requested || !run_is_active {
-                    let data = Value::Null;
-                    let result = ToolResult {
-                        status: "cancelled",
-                        side_effect: "none",
-                        data: &data,
-                        verification: None,
-                        error_code: Some("CANCELLED_BEFORE_EFFECT"),
-                        error: Some("ação cancelada antes da execução"),
-                    };
-                    self.complete_effect(&call, &result);
-                    if run_is_active {
-                        self.view.status = "ação cancelada antes da confirmação".into();
-                    }
-                    return;
-                }
-                match self.broker.request_approval(&call) {
-                    Ok(approval) => {
-                        let mut pending = call;
-                        pending.authorization_ref = Some(approval.approval_id.clone());
-                        if let Some(store) = self.store.as_ref() {
-                            let _ = store.record_approval(&ApprovalRecord {
-                                id: approval.approval_id,
-                                run_id: pending.run_id.clone(),
-                                call_id: pending.call_id.clone(),
-                                args_hash: approval.args_hash,
-                                scope: approval.scope,
-                                expires_at: approval.expires_at,
-                                state: "pending".into(),
-                            });
-                        }
-                        let approval_summary =
-                            approval.summary.as_deref().map(redact_activity_text);
-                        self.pending_approval_summary = approval_summary.clone();
-                        self.pending_approval = Some(pending);
-                        self.view.mode = WindowMode::Approval;
-                        self.view.activity = Some(
-                            approval_summary
-                                .unwrap_or_else(|| "Ação aguardando sua confirmação".into()),
-                        );
-                        self.view.status = "aguardando sua confirmação".into();
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        let data = Value::Null;
-                        let result = ToolResult {
-                            status: "error",
-                            side_effect: "none",
-                            data: &data,
-                            verification: None,
-                            error_code: Some("BROKER_ERROR"),
-                            error: Some(&message),
-                        };
-                        self.complete_effect(&call, &result);
-                        if run_is_active {
-                            self.send_broker_result(&call, &result);
-                            self.view.fail_for(
-                                &call.run_id,
-                                format!("não foi possível criar aprovação: {error}"),
-                            );
-                        }
-                    }
-                }
-            }
             Ok(result) => {
-                let approval_was_consumed = call.authorization_ref.is_some()
-                    && result.error_code.as_deref() != Some("INVALID_APPROVAL");
                 let tool_result = ToolResult {
                     status: &result.status,
                     side_effect: &result.side_effect,
@@ -1668,11 +1963,6 @@ impl VoxApp {
                     error: result.error.as_deref(),
                 };
                 self.complete_effect(&call, &tool_result);
-                if result.error_code.as_deref() == Some("INVALID_APPROVAL") {
-                    self.record_approval_state(&call, "invalidated");
-                } else if approval_was_consumed {
-                    self.record_approval_state(&call, "consumed");
-                }
                 if outcome.cancel_requested {
                     if run_is_active {
                         self.view.status = if result.status == "success" {
@@ -1681,21 +1971,14 @@ impl VoxApp {
                             "ação interrompida".into()
                         };
                     }
-                    return;
-                }
-                if run_is_active {
+                } else if run_is_active {
                     self.send_broker_result(&call, &tool_result);
                 }
             }
+            Err(_error) if outcome.cancel_requested => {
+                self.finish_cancelled_broker_execution(&call, run_is_active)
+            }
             Err(error) => {
-                if outcome.cancel_requested {
-                    self.finish_cancelled_broker_execution(
-                        &call,
-                        run_is_active,
-                        active.call.authorization_ref.is_some(),
-                    );
-                    return;
-                }
                 let data = Value::Null;
                 let result = ToolResult {
                     status: "error",
@@ -1706,37 +1989,10 @@ impl VoxApp {
                     error: Some(&error),
                 };
                 self.complete_effect(&call, &result);
-                if call.authorization_ref.is_some() {
-                    self.record_approval_state(&call, "consumed");
-                }
                 if run_is_active {
                     self.send_broker_result(&call, &result);
                 }
             }
-        }
-    }
-
-    fn revoke_pending_approval(&mut self, state: &str) {
-        let Some(call) = self.pending_approval.take() else {
-            self.pending_approval_summary = None;
-            return;
-        };
-        self.pending_approval_summary = None;
-        if let Some(approval_id) = call.authorization_ref.as_deref() {
-            let _ = self.broker.revoke_approval(approval_id);
-        }
-        self.record_approval_state(&call, state);
-        if state == "cancelled" {
-            let data = Value::Null;
-            let result = ToolResult {
-                status: "cancelled",
-                side_effect: "none",
-                data: &data,
-                verification: None,
-                error_code: Some("CANCELLED_BEFORE_EFFECT"),
-                error: Some("ação cancelada antes da execução"),
-            };
-            self.complete_effect(&call, &result);
         }
     }
 
@@ -1747,7 +2003,6 @@ impl VoxApp {
         } else {
             self.cancel_active_broker_execution();
         }
-        self.revoke_pending_approval("cancelled");
         let Some(run_id) = run_id else {
             return;
         };
@@ -1767,7 +2022,6 @@ impl VoxApp {
         if let Some(run_id) = self.view.active_run.clone() {
             self.cancel_broker_execution_for(&run_id);
         }
-        self.revoke_pending_approval("invalidated");
         let configuration_was_pending = self.configuration_restart_pending;
         self.configuration_restart_pending = false;
         let pending_unknown = self
@@ -1842,7 +2096,6 @@ impl VoxApp {
             return false;
         }
         self.configuration_restart_pending = false;
-        self.revoke_pending_approval("invalidated");
         self.supervisor.take();
         self.view.connected = false;
         self.view.status = "aplicando configuração…".into();
@@ -1896,69 +2149,6 @@ impl VoxApp {
         });
     }
 
-    fn approve_pending(&mut self) {
-        let Some(call) = self.pending_approval.take() else {
-            return;
-        };
-        self.pending_approval_summary = None;
-        if self.view.active_run.as_deref() != Some(call.run_id.as_str()) {
-            if let Some(approval_id) = call.authorization_ref.as_deref() {
-                let _ = self.broker.revoke_approval(approval_id);
-            }
-            self.record_approval_state(&call, "cancelled");
-            return;
-        }
-        match self.start_broker_execution(call.clone()) {
-            Ok(()) => {
-                self.view.mode = WindowMode::Conversation;
-                self.view.status = "ação autorizada; executando".into();
-            }
-            Err(error) => {
-                if let Some(approval_id) = call.authorization_ref.as_deref() {
-                    let _ = self.broker.revoke_approval(approval_id);
-                }
-                self.record_approval_state(&call, "invalidated");
-                let data = Value::Null;
-                let result = ToolResult {
-                    status: "error",
-                    side_effect: "none",
-                    data: &data,
-                    verification: None,
-                    error_code: Some("BROKER_WORKER_UNAVAILABLE"),
-                    error: Some(&error),
-                };
-                self.complete_effect(&call, &result);
-                self.send_broker_result(&call, &result);
-                self.view
-                    .fail(format!("não foi possível iniciar a ação: {error}"));
-            }
-        }
-    }
-
-    fn deny_pending(&mut self) {
-        let Some(call) = self.pending_approval.take() else {
-            return;
-        };
-        self.pending_approval_summary = None;
-        if let Some(approval_id) = call.authorization_ref.as_deref() {
-            let _ = self.broker.revoke_approval(approval_id);
-        }
-        self.record_approval_state(&call, "denied");
-        let data = Value::Null;
-        let result = ToolResult {
-            status: "cancelled",
-            side_effect: "none",
-            data: &data,
-            verification: None,
-            error_code: Some("USER_DENIED"),
-            error: Some("ação negada pelo usuário"),
-        };
-        self.complete_effect(&call, &result);
-        self.send_broker_result(&call, &result);
-        self.view.mode = WindowMode::Conversation;
-        self.view.status = "ação negada".into();
-    }
-
     fn handle_event(&mut self, event: Value) {
         let kind = event
             .get("type")
@@ -1979,6 +2169,71 @@ impl VoxApp {
             }
             "heartbeat" => {
                 self.last_heartbeat_received = Instant::now();
+                let request_id = event
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if request_id.starts_with("jev-probe:") {
+                    let probe = event.get("agent_probe").and_then(Value::as_object);
+                    let available = probe
+                        .and_then(|probe| probe.get("available"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.jev_keyring_status = Some(if available {
+                        let model = probe
+                            .and_then(|probe| probe.get("model_ref"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(self.jev_model_input.trim());
+                        format!("Conexão com Jev confirmada · {model}")
+                    } else {
+                        let error = probe
+                            .and_then(|probe| probe.get("error"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("Jev não respondeu ao teste");
+                        format!(
+                            "Não foi possível conectar ao Jev: {}",
+                            redact_activity_text(error)
+                        )
+                    });
+                    return;
+                }
+                if request_id.starts_with("text-probe:") {
+                    let probe = event.get("text_probe").and_then(Value::as_object);
+                    let available = probe
+                        .and_then(|probe| probe.get("available"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.provider_keyring_status = Some(if available {
+                        let models = probe
+                            .and_then(|probe| probe.get("model_ids"))
+                            .and_then(Value::as_array)
+                            .map(|models| {
+                                models
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .take(3)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .filter(|models| !models.is_empty());
+                        match models {
+                            Some(models) => {
+                                format!("Conexão de texto confirmada · modelos: {models}")
+                            }
+                            None => "Conexão de texto confirmada.".into(),
+                        }
+                    } else {
+                        let error = probe
+                            .and_then(|probe| probe.get("error"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("o endpoint não respondeu ao teste");
+                        format!(
+                            "Não foi possível conectar ao texto: {}",
+                            redact_activity_text(error)
+                        )
+                    });
+                    return;
+                }
                 if self.view.connected && self.view.active_run.is_none() {
                     self.view.status = "pronto".into();
                 }
@@ -2082,6 +2337,21 @@ impl VoxApp {
                     event.get("call_id").and_then(Value::as_str),
                     event.get("tool").and_then(Value::as_str),
                 ) {
+                    let Some(task_grant_id) = event.get("task_grant_id").and_then(Value::as_str)
+                    else {
+                        self.view.fail_for(
+                            run_id,
+                            "o core solicitou uma ferramenta sem autorização de tarefa",
+                        );
+                        return;
+                    };
+                    if self.active_task_grant.as_deref() != Some(task_grant_id) {
+                        self.view.fail_for(
+                            run_id,
+                            "o core solicitou uma ferramenta com autorização de tarefa inválida",
+                        );
+                        return;
+                    }
                     let arguments = event
                         .get("arguments")
                         .cloned()
@@ -2097,9 +2367,9 @@ impl VoxApp {
                     let call = BrokerCall {
                         call_id: call_id.into(),
                         run_id: run_id.into(),
+                        task_grant_id: task_grant_id.into(),
                         tool: tool.into(),
                         arguments,
-                        authorization_ref: None,
                     };
                     if let Some(store) = self.store.as_ref() {
                         match store.effect(&Self::effect_key(&call)) {
@@ -2174,16 +2444,6 @@ impl VoxApp {
                     ("cancelled", _) => "ação cancelada".into(),
                     _ => "ação não concluída".into(),
                 };
-            }
-            "approval.required" => {
-                let Some(run_id) = event.get("run_id").and_then(Value::as_str) else {
-                    return;
-                };
-                if self.view.active_run.as_deref() != Some(run_id) {
-                    return;
-                }
-                self.view.mode = WindowMode::Approval;
-                self.view.activity = Some("Preciso da sua confirmação antes de continuar".into());
             }
             "run.completed" => {
                 let Some(run_id) = event.get("run_id").and_then(Value::as_str) else {
@@ -2329,10 +2589,8 @@ impl eframe::App for VoxApp {
             self.window_level_applied = true;
         }
         if self.last_lease_renewed.elapsed() >= Duration::from_secs(5) {
-            let lease_ok = renew_execution_lease(
-                self.store.as_ref(),
-                self.desktop_lease_owner.as_deref(),
-            );
+            let lease_ok =
+                renew_execution_lease(self.store.as_ref(), self.desktop_lease_owner.as_deref());
             self.last_lease_renewed = Instant::now();
             if !lease_ok {
                 if self.view.active_run.is_some() {
@@ -2462,6 +2720,12 @@ impl eframe::App for VoxApp {
                         "Provider configurado: o texto pode sair deste computador.",
                     );
                 }
+                if agent_is_configured(&self.jev_model_input) {
+                    ui.colored_label(
+                        palette.warning,
+                        "Jev configurado: estado redigido e opções de decisão podem sair deste computador.",
+                    );
+                }
 
                 if self.view.mode == WindowMode::Compact {
                     let compact_status = self
@@ -2491,61 +2755,6 @@ impl eframe::App for VoxApp {
                     }
                 } else {
                     ui.add_space(12.0);
-                    if self.view.mode == WindowMode::Approval {
-                        ui.colored_label(
-                            palette.warning,
-                            "Ação aguardando confirmação",
-                        );
-                        let approval_summary = self
-                            .pending_approval_summary
-                            .clone()
-                            .unwrap_or_else(|| "Esta ação pode alterar o computador.".into());
-                        let approval_details = self.pending_approval.as_ref().map(|call| {
-                            (
-                                call.tool.clone(),
-                                serde_json::to_string(&redacted_value_for_display(
-                                    &call.arguments,
-                                ))
-                                .unwrap_or_else(|_| "argumentos indisponíveis".into()),
-                                approval_decision_labels(call),
-                            )
-                        });
-                        if let Some((tool, arguments, (approve_label, deny_label))) = approval_details {
-                            ui.group(|ui| {
-                                ui.strong(&approval_summary);
-                                ui.small("Confirme somente se a ação e o alvo correspondem ao seu pedido.");
-                                ui.collapsing("Detalhes", |ui| {
-                                    ui.label(format!("Ferramenta: {tool}"));
-                                    ui.monospace(arguments);
-                                });
-                                ui.small("A autorização vale somente para esta chamada exata e expira após uso.");
-                                ui.add_space(4.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.add(primary_button(approve_label, palette)).clicked() {
-                                        self.approve_pending();
-                                    }
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                egui::RichText::new(deny_label)
-                                                    .color(palette.error),
-                                            )
-                                            .stroke(egui::Stroke::new(1.0, palette.error))
-                                            .corner_radius(8)
-                                            .min_size(egui::vec2(88.0, 36.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.deny_pending();
-                                    }
-                                });
-                            });
-                        } else {
-                            ui.small(
-                                "A confirmação ainda está sendo preparada. Nenhuma ação será executada antes de você ver os detalhes.",
-                            );
-                        }
-                    }
                     let has_model_activity = !self.view.model_activity.is_empty();
                     if self.view.messages.is_empty() {
                         ui.label(egui::RichText::new("Como posso ajudar?").size(15.0));
@@ -2626,7 +2835,7 @@ impl eframe::App for VoxApp {
                         ui.group(|ui| {
                             ui.strong("Atividade do modelo");
                             ui.small(
-                                "Estas são as mensagens redigidas que saíram do Vox para o provedor. Dados de ferramentas e credenciais sensíveis são ocultados.",
+                                "Estas são as mensagens redigidas enviadas a cada serviço. As entradas do Jev mostram estado e opções; a rodada seguinte registra escolha, confiança, duração e eventual delegação. Dados de ferramentas e credenciais sensíveis são ocultados.",
                             );
                             egui::ScrollArea::vertical()
                                 .id_salt("model-activity")
@@ -2641,10 +2850,14 @@ impl eframe::App for VoxApp {
                                             .unwrap_or_else(|| activity.provider.clone());
                                         ui.label(format!("Rodada {} · {}", activity.round, target));
                                         for message in &activity.messages {
-                                            let label = match message.role.as_str() {
+                                            let label = if message.content.starts_with("[JEV ") {
+                                                "Resultado da decisão Jev"
+                                            } else {
+                                                match message.role.as_str() {
                                                 "system" => "Instruções do Vox",
                                                 "assistant" => "Resposta anterior do modelo",
                                                 _ => "Mensagem ou resultado enviado",
+                                                }
                                             };
                                             ui.small(label);
                                             ui.monospace(&message.content);
@@ -2675,10 +2888,7 @@ impl eframe::App for VoxApp {
                             input.key_pressed(egui::Key::Enter) && !input.modifiers.shift
                         });
                     let can_submit_draft = self.view.connected
-                        && draft_submission_allowed(
-                            &self.view,
-                            self.pending_approval.is_some(),
-                        );
+                        && draft_submission_allowed(&self.view);
                     ui.horizontal(|ui| {
                         ui.add_enabled(
                             self.voice.is_enabled(),
@@ -2693,9 +2903,7 @@ impl eframe::App for VoxApp {
                                 if ui.add(stop_button(palette)).clicked() {
                                     self.stop();
                                 }
-                            } else if self.view.mode != WindowMode::Approval
-                                && self.pending_approval.is_none()
-                                && ui
+                            } else if ui
                                     .add_enabled(
                                         can_submit_draft && !self.view.draft.trim().is_empty(),
                                         primary_button("Enviar", palette),
@@ -2908,13 +3116,13 @@ impl eframe::App for VoxApp {
                             }
                         }
                     });
-                    ui.label("Provider");
+                    ui.heading("Texto e planejamento");
                     ui.label(&self.view.model_label);
                     ui.label("Endpoint (HTTPS; HTTP somente em localhost)");
                     ui.text_edit_singleline(&mut self.provider_endpoint_input);
                     ui.label("Modelo");
                     ui.text_edit_singleline(&mut self.provider_model_input);
-                    if ui.button("Salvar configuração do provider").clicked() {
+                    if ui.button("Salvar configuração de texto").clicked() {
                         self.save_provider_settings();
                     }
                     ui.label("Conta do keyring (a chave não fica no SQLite)");
@@ -2927,10 +3135,39 @@ impl eframe::App for VoxApp {
                     if ui.button("Salvar chave no keyring").clicked() {
                         self.save_provider_credential();
                     }
+                    if ui.button("Testar conexão de texto").clicked() {
+                        self.test_text_connection();
+                    }
                     if let Some(status) = self.provider_keyring_status.as_deref() {
                         ui.small(status);
                     }
                     ui.small("A configuração é aplicada ao reiniciar o core privado ocioso; durante uma tarefa ela aguarda o término.");
+                    ui.separator();
+                    ui.heading("Agente Jev");
+                    ui.small(
+                        "Jev conduz cada passo por opções delimitadas. Recebe estado redigido, candidatos e evidências de verificação.",
+                    );
+                    ui.label("Modelo Jev");
+                    ui.text_edit_singleline(&mut self.jev_model_input);
+                    if ui.button("Salvar configuração do Jev").clicked() {
+                        self.save_jev_settings();
+                    }
+                    ui.label("Conta do keyring do Jev (a chave não fica no SQLite)");
+                    ui.text_edit_singleline(&mut self.jev_account);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.jev_secret_input)
+                            .password(true)
+                            .hint_text("nova chave do Jev, opcional"),
+                    );
+                    if ui.button("Salvar chave do Jev no keyring").clicked() {
+                        self.save_jev_credential();
+                    }
+                    if ui.button("Testar conexão com Jev").clicked() {
+                        self.test_jev_connection();
+                    }
+                    if let Some(status) = self.jev_keyring_status.as_deref() {
+                        ui.small(status);
+                    }
                     ui.separator();
                     ui.label("Pastas permitidas");
                     ui.small(
@@ -2993,261 +3230,4 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transparency_redacts_text_and_structured_arguments_before_rendering() {
-        let text = redact_activity_text(
-            "Bearer secret-one API_KEY=secret-two sk-or-v1-0123456789abcdef0123456789abcdef",
-        );
-        assert!(!text.contains("secret-one"));
-        assert!(!text.contains("secret-two"));
-        assert!(!text.contains("sk-or-v1-0123456789abcdef0123456789abcdef"));
-        assert!(text.contains("[REDACTED]"));
-
-        let value = redacted_value_for_display(&serde_json::json!({
-            "authorization": "Bearer hidden",
-            "nested": {"token": "also-hidden", "safe": "visible"}
-        }));
-        let rendered = value.to_string();
-        assert!(!rendered.contains("hidden"));
-        assert!(!rendered.contains("also-hidden"));
-        assert!(rendered.contains("visible"));
-    }
-
-    #[test]
-    fn transparency_redacts_portuguese_credential_names_before_rendering() {
-        let text =
-            redact_activity_text("Senha=segredo-um credencial: segredo-dois chave=segredo-tres");
-        assert!(!text.contains("segredo-um"));
-        assert!(!text.contains("segredo-dois"));
-        assert!(!text.contains("segredo-tres"));
-
-        let value = redacted_value_for_display(&serde_json::json!({
-            "senha": "oculto-um",
-            "nested": {
-                "credenciais": "oculto-dois",
-                "chave": "oculto-tres",
-                "safe": "visível"
-            }
-        }));
-        let rendered = value.to_string();
-        assert!(!rendered.contains("oculto-um"));
-        assert!(!rendered.contains("oculto-dois"));
-        assert!(!rendered.contains("oculto-tres"));
-        assert!(rendered.contains("visível"));
-    }
-
-    #[test]
-    fn transparency_fully_redacts_quoted_credential_values_with_spaces() {
-        let redacted = redact_activity_text(
-            "password=\"english secret with spaces\" senha='segredo em portugues com espacos'",
-        );
-        assert!(!redacted.contains("english secret with spaces"));
-        assert!(!redacted.contains("segredo em portugues com espacos"));
-        assert_eq!(redacted, "password=\"[REDACTED]\" senha='[REDACTED]'");
-    }
-
-    #[test]
-    fn theme_preference_defaults_to_system_and_migrates_legacy_choice() {
-        assert_eq!(
-            ThemePreference::from_preferences(None, None),
-            ThemePreference::System
-        );
-        assert_eq!(
-            ThemePreference::from_preferences(Some("dark"), Some("false")),
-            ThemePreference::Dark
-        );
-        assert_eq!(
-            ThemePreference::from_preferences(None, Some("true")),
-            ThemePreference::Dark
-        );
-        assert_eq!(
-            ThemePreference::from_preferences(None, Some("false")),
-            ThemePreference::Light
-        );
-        assert_eq!(ThemePreference::System.storage_value(), "system");
-        assert_eq!(
-            ThemePreference::Light.as_egui(),
-            egui::ThemePreference::Light
-        );
-    }
-
-    #[test]
-    fn system_theme_uses_the_operating_system_and_light_fallback() {
-        let ctx = egui::Context::default();
-        install_vox_theme(&ctx, ThemePreference::System);
-        assert_eq!(ctx.theme(), egui::Theme::Light);
-
-        ctx.begin_pass(egui::RawInput {
-            system_theme: Some(egui::Theme::Dark),
-            ..Default::default()
-        });
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
-        let mut output = ctx.end_pass();
-        output.textures_delta.clear();
-
-        ctx.begin_pass(egui::RawInput {
-            system_theme: Some(egui::Theme::Light),
-            ..Default::default()
-        });
-        assert_eq!(ctx.theme(), egui::Theme::Light);
-        let mut output = ctx.end_pass();
-        output.textures_delta.clear();
-    }
-
-    #[test]
-    fn approval_controls_name_the_effect_and_draft_waits_for_a_decision() {
-        let overwrite = BrokerCall {
-            call_id: "overwrite".into(),
-            run_id: "run".into(),
-            tool: "files.write".into(),
-            arguments: serde_json::json!({"overwrite": true}),
-            authorization_ref: Some("approval".into()),
-        };
-        assert_eq!(
-            approval_decision_labels(&overwrite),
-            ("Substituir arquivo", "Cancelar alteração")
-        );
-        let shell = BrokerCall {
-            tool: "shell.exec".into(),
-            ..overwrite.clone()
-        };
-        assert_eq!(
-            approval_decision_labels(&shell),
-            ("Executar comando", "Cancelar comando")
-        );
-
-        let mut view = PresentationState::default();
-        assert!(draft_submission_allowed(&view, false));
-        view.mode = WindowMode::Approval;
-        assert!(!draft_submission_allowed(&view, false));
-        view.mode = WindowMode::Conversation;
-        assert!(!draft_submission_allowed(&view, true));
-        view.active_run = Some("run".into());
-        assert!(!draft_submission_allowed(&view, false));
-    }
-
-    #[test]
-    fn saved_provider_fields_select_the_private_provider_and_default_to_safe_demo() {
-        let demo = provider_core_environment("", "");
-        assert!(demo.contains(&("VOX_PROVIDER".into(), "fake".into())));
-        assert!(demo.contains(&("VOX_PROVIDER_API_KEY".into(), String::new())));
-        assert!(!provider_is_configured("", "model"));
-
-        let configured = provider_core_environment("http://127.0.0.1:8080", "local-model");
-        assert!(configured.contains(&("VOX_PROVIDER".into(), "openai-compatible".into())));
-        assert!(configured.contains(&(
-            "VOX_PROVIDER_BASE_URL".into(),
-            "http://127.0.0.1:8080".into()
-        )));
-        assert!(provider_is_configured(
-            "http://127.0.0.1:8080",
-            "local-model"
-        ));
-    }
-
-    #[test]
-    fn provider_configuration_never_treats_a_plaintext_key_as_metadata() {
-        let provider_key = "sk-or-v1-0123456789abcdef0123456789abcdef";
-        assert!(provider_configuration_contains_secret(provider_key));
-        assert!(!provider_configuration_is_safe(
-            "https://provider.example/v1",
-            provider_key
-        ));
-        assert!(provider_keyring_environment(provider_key, true).is_empty());
-
-        let environment = provider_core_environment("https://provider.example/v1", provider_key);
-        assert!(environment.contains(&("VOX_PROVIDER".into(), "fake".into())));
-        assert!(environment.contains(&("VOX_PROVIDER_API_KEY".into(), String::new())));
-    }
-
-    #[test]
-    fn missing_linux_keyring_shows_an_installation_action() {
-        let message = provider_keyring_error_message(&SecretError::NativeToolMissing);
-        assert!(message.contains("libsecret-tools"));
-        assert!(message.contains("não foi gravada"));
-        assert!(!message.contains("chave de teste"));
-    }
-
-    #[test]
-    fn allowed_roots_require_existing_directories_and_are_canonicalized() {
-        let root = std::env::temp_dir().join(format!("vox-allowed-roots-{}", Uuid::new_v4()));
-        let nested = root.join("nested");
-        fs::create_dir_all(&nested).unwrap();
-
-        let input = format!("{}\n{}", root.display(), root.join(".").display());
-        let roots = parse_allowed_roots(&input).unwrap();
-        assert_eq!(roots, vec![root.canonicalize().unwrap()]);
-        assert!(parse_allowed_roots(&root.join("missing").display().to_string()).is_err());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn queued_cancellation_keeps_an_approval_unconsumed() {
-        let broker = Arc::new(Broker::new(RuntimeConfig::default()));
-        let worker = BrokerWorker::spawn(Arc::clone(&broker));
-        let mut call = BrokerCall {
-            call_id: "cancel-before-start".into(),
-            run_id: "run-cancel-before-start".into(),
-            tool: "shell.exec".into(),
-            arguments: serde_json::json!({"program":"printf","argv":["still-approved"]}),
-            authorization_ref: None,
-        };
-        let approval = broker.request_approval(&call).unwrap();
-        call.authorization_ref = Some(approval.approval_id);
-        let cancel = Arc::new(AtomicBool::new(true));
-
-        worker
-            .execute(
-                "cancel-before-start-job".into(),
-                call.clone(),
-                Arc::clone(&cancel),
-            )
-            .unwrap();
-        let result = worker.recv_timeout(Duration::from_secs(1)).unwrap();
-
-        assert!(result.cancel_requested);
-        assert!(result.result.is_err());
-        // The worker checks cancellation before entering the broker, so the
-        // authorization remains available for the exact call it was issued for.
-        assert_eq!(broker.execute(&call).unwrap().status, "success");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn running_worker_execution_observes_cancellation() {
-        let broker = Arc::new(Broker::new(RuntimeConfig::default()));
-        let worker = BrokerWorker::spawn(Arc::clone(&broker));
-        let mut call = BrokerCall {
-            call_id: "cancel-running".into(),
-            run_id: "run-cancel-running".into(),
-            tool: "shell.exec".into(),
-            arguments: serde_json::json!({
-                "program":"sh",
-                "argv":["-c","sleep 30"],
-                "timeout_ms": 30_000
-            }),
-            authorization_ref: None,
-        };
-        let approval = broker.request_approval(&call).unwrap();
-        call.authorization_ref = Some(approval.approval_id);
-        let cancel = Arc::new(AtomicBool::new(false));
-
-        worker
-            .execute("cancel-running-job".into(), call, Arc::clone(&cancel))
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(75));
-        cancel.store(true, Ordering::Relaxed);
-        let result = worker.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        assert!(result.cancel_requested);
-        assert!(matches!(result.result, Err(message) if message.contains("cancelled")));
-    }
 }

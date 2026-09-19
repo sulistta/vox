@@ -1,52 +1,18 @@
-# Matriz de efeitos das ferramentas
+# Matriz de ferramentas
 
-O broker é o único ponto que transforma uma intenção em efeito. A tabela
-abaixo é a referência de T080: cada ferramenta possui pré-condição,
-pós-condição, timeout e política de repetição. `unknown` exige observação ou
-decisão do usuário; nunca há retry cego.
+O envio explícito de uma tarefa cria um `TaskGrant` com ferramentas inferidas do pedido. O broker só executa uma chamada se o grant pertencer ao mesmo run, estiver ativo e contiver a ferramenta. O runtime continua sendo a autoridade para raízes de arquivos, argumentos, identidade de processos e efeitos.
 
-| Tool | Efeito | Pré-condição | Pós-condição observável | Timeout/cancelamento | Repetição |
-|---|---|---|---|---|---|
-| `desktop.list_windows` | read | backend de acessibilidade disponível | lista marcada como observada e fresca | chamada nativa; diagnóstico recuperável | segura, nova observação |
-| `desktop.snapshot` | read | sessão AT-SPI/UIA/AX autorizada; `app_pid` opcional deve vir de janela listada | snapshot limitado, refs opacas, texto de nó limitado/redigido, truncation explícita e PID observado | limites de 512 nós/8 níveis; ids curtos e opacos; escopo por processo evita varrer árvores alheias | nova captura, nunca reutilizar stale |
-| `desktop.query` | read | `snapshot_id` emitido pelo broker e query bounded | refs que atendem papel/nome/estado/ação; ambiguidade permanece explícita | snapshot válido por 30 s; nova captura antes de agir | segura sobre snapshot, não autoriza efeito |
-| `desktop.wait_for` | read | backend nativo, query bounded e, quando presente, `app_pid` observado | ref observada em nova captura ou `unknown` com timeout | polling bounded de até 30 s; cancelamento do run; pode restringir ao processo-alvo | nova observação, nunca retry de efeito |
-| `desktop.act` | write/unknown | `snapshot_id` emitido pelo broker, ref ainda válida e approval | dispatch separado da pós-condição; `verified:false` até reobservar | snapshot é consumido; backend nativo sem sucesso implícito | somente após reconciliação |
-| `clipboard.read` | read | backend do SO disponível; nenhuma coleta contínua | texto limitado, MIME `text/plain`, backend e observação retornados | comando nativo bounded a 2 s; cancelamento do run | segura, nova leitura sob demanda |
-| `clipboard.write` | write | texto bounded; approval hash-bound; backend do SO disponível | bytes escritos e backend retornados como `applied` somente após o processo terminar | comando nativo bounded a 2 s; cancelamento do run | não repetir sem decisão se o backend terminar em estado desconhecido |
-| `files.read` | read | path dentro da raiz permitida | bytes/encoding/tamanho conferidos | limite de saída | segura |
-| `files.search` | read | raiz existente e limite válido | candidatos dentro da raiz, truncation explícita | limite de entradas | segura |
-| `files.list` | read | diretório existente | entradas e metadados bounded | limite de entradas | segura |
-| `files.write` | write | approval hash-bound; pai permitido; destino ausente salvo overwrite | arquivo existe e tamanho confere | escrita temp + rename; sem worker pendurado | se destino existe, ler/reconciliar |
-| `files.move` | write | approval hash-bound; origem identificada; destino sem conflito | destino existe e origem não existe | rename local ou cópia sincronizada explicitamente marcada cross-device | nunca repetir sem observar |
-| `shell.exec` | arbitrary | argv explícito, cwd permitido, approval | exit code e output bounded; efeitos externos continuam `unknown` | timeout e cancel direto do filho | decisão humana após efeito |
-| `process.list` | read | plataforma suporta enumeração | PID + identidade retornados | bounded | segura |
-| `process.terminate` | external | PID + comando + start-time conferidos; approval | ausência observada em deadline vira `applied`; caso contrário `unknown` | TERM/taskkill; grupos privados somente para workers Vox | não repetir com PID reutilizado |
-| `apps.resolve` | read | nome curto e bounded | caminho de executável presente no catálogo local; nenhum processo iniciado | consulta ao PATH; cancelamento não produz efeito | segura, nova consulta |
-| `apps.launch` | external | programa/argv resolvidos; approval | spawn observado; janela ainda não é prova | processo separado | reconciliar antes de relançar |
-| `paths.open` | external | path dentro da raiz; approval | launcher aceitou o caminho; app útil ainda pendente | launcher do SO | não repetir sem observar |
+| Ferramenta | Pré-condições além do grant | Verificação | Repetição |
+|---|---|---|---|
+| `desktop.list_windows` | bridge de acessibilidade disponível | lista recente de janelas/PIDs | nova observação |
+| `desktop.snapshot` / `desktop.query` / `desktop.wait_for` | PID já observado quando informado; snapshot atual | referências e evidência nativa | nunca reutilizar ref vencida |
+| `desktop.act` | ref emitida pelo broker; campo não sensível | pós-condição observada, ou `unknown` | nunca repetir automaticamente |
+| `apps.resolve` / `apps.launch` | `apps.launch` só aceita executável resolvido no mesmo grant | spawn não prova janela utilizável | observar antes de relançar |
+| `process.list` / `process.terminate` | término requer PID, comando e início observados no mesmo grant | ausência do processo | nunca reutilizar PID |
+| `files.read` / `files.search` / `files.list` | caminho dentro de raiz permitida | bytes/listagem bounded | segura sob nova leitura |
+| `files.write` / `files.move` | origem/destino dentro de raiz; sobrescrita explícita | tamanho, existência e origem/destino | reconciliar antes de nova ação |
+| `clipboard.read` / `clipboard.write` | backend do SO disponível | backend e bytes retornados | não repetir após estado incerto |
+| `paths.open` | caminho dentro de raiz | launcher aceitou o alvo | observar aplicativo depois |
+| `shell.exec` | pedido menciona terminal/comando; argv e cwd passam pelo runtime | exit code e saída bounded | efeitos externos permanecem `unknown` até evidência |
 
-As raízes de arquivos são escolhidas pelo usuário em **Preferências → Pastas
-permitidas**, uma por linha. O broker só recebe raízes canônicas existentes;
-alterar a lista aguarda o término do run atual antes de valer para uma nova
-tarefa.
-
-## Registro de efeito
-
-Antes de executar uma ação, o caller deve manter `run_id`, `call_id`, hash dos
-argumentos e approval específico. Depois deve registrar status, side effect,
-verification e erro. O SQLite usa `idempotency_key` para não inserir o mesmo
-resultado duas vezes, mas isso não torna a ação externa atômica.
-
-## Limites conhecidos
-
-- Execuções argv usam ambiente mínimo e grupo privado no Unix; ações externas
-  continuam exigindo reconciliação.
-- O adapter xa11y despacha ação nativa, mas só pode marcar sucesso após nova
-  observação do estado-alvo.
-- Clipboard não é observado em background. Linux usa `wl-paste`/`wl-copy` em
-  Wayland e `xclip` em X11; macOS usa `pbpaste`/`pbcopy`; Windows usa
-  PowerShell. O backend pode ser substituído por comando fixture em teste, sem
-  persistir o conteúdo.
-- `apps.launch` e `paths.open` informam spawn/aceite do launcher, não uma
-  janela usável.
+Uma chamada abaixo da confiança exigida faz Jev escolher reobservação ou replanejamento. A confiança nunca amplia o grant. O journal registra a intenção antes do efeito; uma queda converte intenção pendente em `unknown`.

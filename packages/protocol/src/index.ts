@@ -14,7 +14,6 @@ export type RunState =
   | "thinking"
   | "executing"
   | "waiting_user"
-  | "awaiting_approval"
   | "cancelling"
   | "completed"
   | "failed"
@@ -51,6 +50,7 @@ export interface TurnStartRequest {
   request_id: string;
   session_id: string;
   run_id: string;
+  task_grant_id: string;
   content: string;
   source?: "text" | "voice";
   model_ref?: string;
@@ -154,6 +154,7 @@ export interface ModelRequestedEvent {
 interface ToolEventFields {
   session_id: string;
   run_id: string;
+  task_grant_id: string;
   call_id: string;
   tool: string;
   arguments: JsonObject;
@@ -179,18 +180,6 @@ export interface ToolCompletedEvent {
   data?: JsonValue;
   error?: string;
   verification?: JsonValue;
-}
-
-export interface ApprovalRequiredEvent {
-  type: "approval.required";
-  session_id: string;
-  run_id: string;
-  call_id: string;
-  tool: string;
-  arguments: JsonObject;
-  effect: EffectClass;
-  approval_id: string;
-  expires_at: string;
 }
 
 export interface RunCompletedEvent {
@@ -242,7 +231,6 @@ export type IpcEvent =
   | ToolStartedEvent
   | ToolRequestedEvent
   | ToolCompletedEvent
-  | ApprovalRequiredEvent
   | RunCompletedEvent
   | RunFailedEvent
   | RunCancelledEvent

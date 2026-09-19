@@ -41,9 +41,6 @@
       "$ref": "#/$defs/tool.execute.requested"
     },
     {
-      "$ref": "#/$defs/approval.required"
-    },
-    {
       "$ref": "#/$defs/state.changed"
     },
     {
@@ -211,6 +208,12 @@
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "content": {
           "type": "string",
           "minLength": 0,
@@ -274,6 +277,7 @@
         "request_id",
         "session_id",
         "run_id",
+        "task_grant_id",
         "content"
       ],
       "additionalProperties": true
@@ -532,6 +536,12 @@
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "call_id": {
           "type": "string",
           "minLength": 1,
@@ -562,6 +572,7 @@
         "type",
         "session_id",
         "run_id",
+        "task_grant_id",
         "call_id",
         "tool",
         "arguments",
@@ -587,6 +598,12 @@
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "call_id": {
           "type": "string",
           "minLength": 1,
@@ -617,79 +634,11 @@
         "type",
         "session_id",
         "run_id",
+        "task_grant_id",
         "call_id",
         "tool",
         "arguments",
         "effect"
-      ],
-      "additionalProperties": true
-    },
-    "approval.required": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "const": "approval.required"
-        },
-        "session_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "run_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "call_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "tool": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "arguments": {
-          "type": "object"
-        },
-        "effect": {
-          "type": "string",
-          "enum": [
-            "none",
-            "read",
-            "write",
-            "external",
-            "arbitrary"
-          ]
-        },
-        "approval_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "expires_at": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        }
-      },
-      "required": [
-        "type",
-        "session_id",
-        "run_id",
-        "call_id",
-        "tool",
-        "arguments",
-        "effect",
-        "approval_id",
-        "expires_at"
       ],
       "additionalProperties": true
     },
@@ -720,7 +669,6 @@
             "thinking",
             "executing",
             "waiting_user",
-            "awaiting_approval",
             "cancelling",
             "completed",
             "failed",

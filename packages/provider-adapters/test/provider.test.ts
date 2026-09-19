@@ -1,358 +1,129 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import test from "node:test";
 import {
-  OpenAICompatibleTextProvider,
-  FakeTextProvider,
+  OpenAICompatibleTextPlanner,
   ProviderError,
-  displayEffectForTool,
-  parseJsonToolCall,
-  parseModelDecision,
-  probeOpenAICompatible,
-  providerFromEnvironment,
-  redactJsonForModel,
-  redactTextForModel,
+  TypeSafeJevAgent,
 } from "../src/index.js";
 
-async function startServer(handler: (request: import("node:http").IncomingMessage) => { status: number; body: string }): Promise<{ url: string; close: () => Promise<void> }> {
+async function fixture(handler: (body: string, response: import("node:http").ServerResponse) => void) {
   const server = createServer((request, response) => {
-    const result = handler(request);
-    response.writeHead(result.status, { "content-type": "application/json" });
-    response.end(result.body);
+    let body = "";
+    request.on("data", (chunk: Buffer) => { body += chunk; });
+    request.on("end", () => handler(body, response));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  return {
-    url: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
-  };
+  if (!address || typeof address === "string") throw new Error("fixture address unavailable");
+  return { baseUrl: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
-async function withMockedFetch<T>(response: Response, operation: () => Promise<T>): Promise<T> {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => response) as typeof fetch;
-  try {
-    return await operation();
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-}
+const questions = [{ type: "choice" as const, id: "next", instructions: "Escolha", options: [{ id: "a", description: "A" }, { id: "b", description: "B" }] }];
 
-function streamingResponse(getReader: () => ReadableStreamDefaultReader<Uint8Array>): Response {
-  return {
-    ok: true,
-    body: { getReader } as unknown as ReadableStream<Uint8Array>,
-    headers: new Headers({ "content-type": "text/event-stream" }),
-  } as Response;
-}
-
-test("default fake provider is textual and cannot propose desktop tools", async () => {
-  const provider = new FakeTextProvider();
-  const controller = new AbortController();
-  const chunks: string[] = [];
-  for await (const chunk of provider.stream("oi", controller.signal)) chunks.push(chunk);
-  const decision = parseModelDecision(chunks.join(""));
-  assert.equal(decision?.type, "final");
-  assert.match(decision?.type === "final" ? decision.content : "", /demonstração/u);
-  assert.equal(provider.capabilities.multimodal, false);
-  assert.equal(provider.capabilities.context_chars, 16 * 1024);
-});
-
-test("environment selects fake provider without exposing credentials", () => {
-  const provider = providerFromEnvironment({ VOX_PROVIDER: "fake", VOX_PROVIDER_API_KEY: "not-used" });
-  assert.equal(provider.id, "fake-text");
-  assert.equal(providerFromEnvironment({ VOX_PROVIDER: "fake-tools" }).id, "fake-tools-fixture");
-});
-
-test("openai-compatible provider requires explicit endpoint and model", () => {
-  assert.throws(() => providerFromEnvironment({ VOX_PROVIDER: "openai-compatible" }), (error) => error instanceof ProviderError && error.code === "CONFIG_ERROR");
-});
-
-test("provider probe reports bounded model ids without exposing response bodies", async () => {
-  const server = await startServer((request) => {
-    if (request.url === "/models") return { status: 200, body: JSON.stringify({ data: [{ id: "local-a" }, { id: "local-b" }, { nope: true }] }) };
-    return { status: 404, body: "missing" };
+test("Jev returns typed Choice answers with the resolved model", async () => {
+  const api = await fixture((body, response) => {
+    assert.match(body, /"questions"/u);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ model: "jev-2026-09", answers: { next: { type: "choice", choice: "a", confidence: 0.91, probabilities: { a: 0.91, b: 0.09 } } } }));
   });
   try {
-    const result = await probeOpenAICompatible({ baseUrl: server.url, model: "local-a" });
-    assert.deepEqual(result, { available: true, model_ids: ["local-a", "local-b"] });
-  } finally {
-    await server.close();
-  }
+    const agent = new TypeSafeJevAgent({ baseUrl: api.baseUrl, apiKey: "test-key" });
+    const result = await agent.decide({ state: "estado sem segredos", questions }, new AbortController().signal);
+    assert.equal(result.model_ref, "jev-2026-09");
+    assert.deepEqual(result.answers.next, { type: "choice", choice: "a", confidence: 0.91, probabilities: { a: 0.91, b: 0.09 } });
+  } finally { await api.close(); }
 });
 
-test("openai-compatible provider rejects insecure remote endpoints", () => {
-  assert.throws(() => providerFromEnvironment({
-    VOX_PROVIDER: "openai-compatible",
-    VOX_PROVIDER_BASE_URL: "http://example.com",
-    VOX_PROVIDER_MODEL: "test-model",
-  }), (error) => error instanceof ProviderError && error.code === "CONFIG_ERROR");
+test("Jev rejects answers outside the supplied catalog", async () => {
+  const api = await fixture((_body, response) => response.end(JSON.stringify({ answers: { next: { type: "choice", choice: "outside", confidence: 1, probabilities: { a: 0.5, b: 0.5 } } } })));
+  try {
+    const agent = new TypeSafeJevAgent({ baseUrl: api.baseUrl, apiKey: "test-key" });
+    await assert.rejects(agent.decide({ state: "state", questions }, new AbortController().signal), (error: unknown) => error instanceof ProviderError && error.code === "INVALID_RESPONSE");
+  } finally { await api.close(); }
 });
 
-test("openai-compatible adapter consumes SSE without logging the credential", async () => {
-  const standaloneProviderKey = "sk-or-v1-0123456789abcdef0123456789abcdef";
-  const portugueseSecretText = "senha=senha-local segredo:segredo-local chave=chave-local credenciais:credencial-local";
-  let requestBody = "";
-  const server = createServer((request, response) => {
-    assert.equal(request.headers.authorization, "Bearer secret-for-test");
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => { requestBody += chunk; });
-    request.on("end", () => {
-      response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write('data: {"choices":[{"delta":{"content":"Olá"}}]}\n\n');
-      response.write('data: {"choices":[{"delta":{"content":" Vox"}}]}\n\n');
-      response.end("data: [DONE]\n\n");
+test("Jev preserves Score and Noul answers", async () => {
+  const api = await fixture((_body, response) => response.end(JSON.stringify({ answers: {
+    choice: { type: "choice", choice: "yes", confidence: 0.8, probabilities: { yes: 0.8, no: 0.2 } },
+    score: { type: "score", score: 0.9, confidence: 0.9, probabilities: { "0": 0.1, "1": 0.9 } },
+    verified: { type: "noul", noul: 0.73 },
+  } })));
+  try {
+    const agent = new TypeSafeJevAgent({ baseUrl: api.baseUrl, apiKey: "test-key" });
+    const result = await agent.decide({ state: "state", questions: [
+      { type: "choice", id: "choice", instructions: "Escolha", options: [{ id: "yes", description: "sim" }, { id: "no", description: "não" }] },
+      { type: "score", id: "score", instructions: "Pontue", levels: [{ id: "low", description: "baixa" }, { id: "high", description: "alta" }] },
+      { type: "noul", id: "verified", statement: "O resultado foi verificado." },
+    ] }, new AbortController().signal);
+    assert.equal(result.answers.score?.type, "score");
+    assert.deepEqual(result.answers.verified, { type: "noul", noul: 0.73 });
+  } finally { await api.close(); }
+});
+
+test("Jev classifies authentication and rate errors", async () => {
+  const auth = await fixture((_body, response) => { response.statusCode = 401; response.end("no"); });
+  const rate = await fixture((_body, response) => { response.statusCode = 429; response.end("slow"); });
+  try {
+    await assert.rejects(new TypeSafeJevAgent({ baseUrl: auth.baseUrl, apiKey: "test" }).decide({ state: "state", questions }, new AbortController().signal), (error: unknown) => error instanceof ProviderError && error.code === "AUTH_ERROR");
+    await assert.rejects(new TypeSafeJevAgent({ baseUrl: rate.baseUrl, apiKey: "test" }).decide({ state: "state", questions }, new AbortController().signal), (error: unknown) => error instanceof ProviderError && error.code === "RATE_LIMIT" && error.retryable);
+  } finally { await auth.close(); await rate.close(); }
+});
+
+test("Jev respects timeout and caller cancellation", async () => {
+  const api = await fixture((_body, response) => setTimeout(() => response.end("{}"), 100));
+  try {
+    await assert.rejects(new TypeSafeJevAgent({ baseUrl: api.baseUrl, apiKey: "test", timeoutMs: 10 }).decide({ state: "state", questions }, new AbortController().signal), (error: unknown) => error instanceof ProviderError && error.code === "TIMEOUT");
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(new TypeSafeJevAgent({ baseUrl: api.baseUrl, apiKey: "test" }).decide({ state: "state", questions }, controller.signal), (error: unknown) => error instanceof ProviderError && error.code === "CANCELLED");
+  } finally { await api.close(); }
+});
+
+test("text planner returns data and never exposes a tool dispatch operation", async () => {
+  const api = await fixture((_body, response) => response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ objective: "listar", app_hints: [], targets: [], expected_result: "lista" }) } }] })));
+  try {
+    const planner = new OpenAICompatibleTextPlanner({ baseUrl: api.baseUrl, apiKey: "test", model: "text" });
+    assert.equal(typeof (planner as { execute?: unknown }).execute, "undefined");
+    assert.equal((await planner.interpretTask("liste", new AbortController().signal)).objective, "listar");
+  } finally { await api.close(); }
+});
+
+test("text connection probe reads only the bounded model catalog", async () => {
+  const api = await fixture((_body, response) => {
+    response.end(JSON.stringify({ data: [{ id: "text-a" }, { id: "text-b" }] }));
+  });
+  try {
+    const planner = new OpenAICompatibleTextPlanner({ baseUrl: api.baseUrl, apiKey: "test", model: "text" });
+    assert.deepEqual(await planner.probe(new AbortController().signal), {
+      available: true,
+      model_ids: ["text-a", "text-b"],
     });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address !== "string");
-    const provider = new OpenAICompatibleTextProvider({
-      baseUrl: `http://127.0.0.1:${address.port}`,
-      model: "test-model",
-      apiKey: "secret-for-test",
+  } finally { await api.close(); }
+});
+
+test("candidate repair is bounded and reports the invalid field without echoing content", async () => {
+  for (const repairSucceeds of [true, false]) {
+    let calls = 0;
+    const api = await fixture((body, response) => {
+      calls += 1;
+      if (calls === 2) {
+        assert.match(body, /verification deve ser texto/u);
+        assert.doesNotMatch(body, /private-marker/u);
+      }
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        candidates: [{ id: "inspect", tool: "desktop.list_windows", arguments: {},
+          label: "Listar", verification: repairSucceeds && calls === 2 ? "Lista observada" : { detail: "private-marker" } }],
+      }) } }] }));
     });
-    const chunks: string[] = [];
-  for await (const chunk of provider.stream(`${standaloneProviderKey} ${portugueseSecretText} senha=\"senha com espaço\"`, new AbortController().signal)) chunks.push(chunk);
-    assert.equal(chunks.join(""), "Olá Vox");
-    assert.equal(requestBody.includes(standaloneProviderKey), false);
-    assert.equal(requestBody.includes("senha-local"), false);
-    assert.equal(requestBody.includes("segredo-local"), false);
-    assert.equal(requestBody.includes("chave-local"), false);
-  assert.equal(requestBody.includes("credencial-local"), false);
-  assert.equal(requestBody.includes("senha com espaço"), false);
-    assert.equal(requestBody.includes("[REDACTED]"), true);
-  } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
-});
-
-test("openai-compatible adapter accepts JSON responses and trailing SSE data", async () => {
-  const jsonServer = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end('{"choices":[{"message":{"content":"Resposta JSON"}}]}');
-  });
-  await new Promise<void>((resolve) => jsonServer.listen(0, "127.0.0.1", resolve));
-  const jsonAddress = jsonServer.address();
-  assert.ok(jsonAddress && typeof jsonAddress !== "string");
-  const jsonProvider = new OpenAICompatibleTextProvider({
-    baseUrl: "http://127.0.0.1:" + jsonAddress.port,
-    model: "test-model",
-  });
-  const jsonChunks: string[] = [];
-  for await (const chunk of jsonProvider.stream("oi", new AbortController().signal)) jsonChunks.push(chunk);
-  assert.deepEqual(jsonChunks, ["Resposta JSON"]);
-  await new Promise<void>((resolve, reject) => jsonServer.close((error) => error ? reject(error) : resolve()));
-
-  const sseServer = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    response.end('data: {"choices":[{"delta":{"content":"fim"}}]}');
-  });
-  await new Promise<void>((resolve) => sseServer.listen(0, "127.0.0.1", resolve));
-  const sseAddress = sseServer.address();
-  assert.ok(sseAddress && typeof sseAddress !== "string");
-  const sseProvider = new OpenAICompatibleTextProvider({
-    baseUrl: "http://127.0.0.1:" + sseAddress.port,
-    model: "test-model",
-  });
-  const sseChunks: string[] = [];
-  for await (const chunk of sseProvider.stream("oi", new AbortController().signal)) sseChunks.push(chunk);
-  assert.deepEqual(sseChunks, ["fim"]);
-  await new Promise<void>((resolve, reject) => sseServer.close((error) => error ? reject(error) : resolve()));
-});
-
-test("openai-compatible adapter bounds unterminated SSE events", async () => {
-  const payload = new TextEncoder().encode(`data: ${"x".repeat(256 * 1024)}`);
-  let reads = 0;
-  const reader = {
-    read: async () => {
-      reads += 1;
-      return reads === 1 ? { done: false as const, value: payload } : { done: true as const, value: undefined };
-    },
-  } as unknown as ReadableStreamDefaultReader<Uint8Array>;
-  const provider = new OpenAICompatibleTextProvider({ baseUrl: "http://127.0.0.1:1", model: "test-model" });
-
-  await withMockedFetch(streamingResponse(() => reader), async () => {
-    await assert.rejects(async () => {
-      for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
-        // The malformed event must fail before producing output.
-      }
-    }, (error) => error instanceof ProviderError
-      && error.code === "INVALID_STREAM"
-      && error.retryable === false);
-  });
-});
-
-test("openai-compatible adapter turns SSE reader failures into retryable network errors", async () => {
-  const provider = new OpenAICompatibleTextProvider({ baseUrl: "http://127.0.0.1:1", model: "test-model" });
-  const failure = new Error("reader transport api_key=reader-secret");
-  const reader = {
-    read: async () => { throw failure; },
-  } as unknown as ReadableStreamDefaultReader<Uint8Array>;
-
-  await withMockedFetch(streamingResponse(() => reader), async () => {
-    await assert.rejects(async () => {
-      for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
-        // The read is expected to fail before producing a chunk.
-      }
-    }, (error) => error instanceof ProviderError
-      && error.code === "NETWORK_ERROR"
-      && error.retryable === true
-      && !error.message.includes("reader-secret")
-      && error.message.includes("[REDACTED]"));
-  });
-});
-
-test("openai-compatible adapter turns SSE reader acquisition failures into retryable network errors", async () => {
-  const provider = new OpenAICompatibleTextProvider({ baseUrl: "http://127.0.0.1:1", model: "test-model" });
-  const failure = new Error("stream setup token=reader-setup-secret");
-
-  await withMockedFetch(streamingResponse(() => { throw failure; }), async () => {
-    await assert.rejects(async () => {
-      for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
-        // The reader is expected to fail before producing a chunk.
-      }
-    }, (error) => error instanceof ProviderError
-      && error.code === "NETWORK_ERROR"
-      && error.retryable === true
-      && !error.message.includes("reader-setup-secret")
-      && error.message.includes("[REDACTED]"));
-  });
-});
-
-test("provider error details redact credentials returned by the server", async () => {
-  const server = createServer((_request, response) => {
-    response.writeHead(401, { "content-type": "text/plain" });
-    response.end('{"error":{"api_key":"super-secret-token"}}');
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const provider = new OpenAICompatibleTextProvider({
-    baseUrl: "http://127.0.0.1:" + address.port,
-    model: "test-model",
-  });
-  await assert.rejects(async () => {
-    for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
-      // The request is expected to fail before producing a chunk.
-    }
-  }, (error) => error instanceof ProviderError
-    && error.code === "AUTH_ERROR"
-    && !error.message.includes("super-secret-token")
-    && error.message.includes("[REDACTED]"));
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-});
-
-test("JSON tool fallback accepts only a bounded object-shaped call", () => {
-  assert.deepEqual(parseJsonToolCall('{"tool":"files.read","arguments":{"path":"a.txt"}}'), {
-    tool: "files.read",
-    arguments: { path: "a.txt" },
-  });
-  assert.equal(parseJsonToolCall('{"tool":"rm -rf /","arguments":{}}'), undefined);
-  assert.equal(parseJsonToolCall('{"tool":"files.read","arguments":[] }'), undefined);
-});
-
-test("model decisions are structured and tool effect labels never authorize calls", () => {
-  assert.deepEqual(parseModelDecision('{"type":"tool_call","tool":"files.read","arguments":{"path":"a.txt"}}'), {
-    type: "tool_calls",
-    calls: [{ tool: "files.read", arguments: { path: "a.txt" } }],
-  });
-  assert.deepEqual(parseModelDecision('{"type":"final","content":"feito"}'), {
-    type: "final",
-    content: "feito",
-  });
-  assert.deepEqual(parseModelDecision('```json\n{"type":"final","content":"feito"}\n```'), {
-    type: "final",
-    content: "feito",
-  });
-  assert.equal(parseModelDecision('{"type":"tool_call","tool":"files.read","arguments":{},"extra":true}'), undefined);
-  assert.equal(parseModelDecision("vou executar files.read"), undefined);
-  assert.equal(parseModelDecision('vou executar\n```json\n{"type":"final","content":"feito"}\n```'), undefined);
-  assert.equal(displayEffectForTool("files.read"), "read");
-  assert.equal(displayEffectForTool("files.write"), "write");
-  assert.equal(displayEffectForTool("unknown.tool"), "arbitrary");
-});
-
-test("redaction protects text and structured tool observations before model reuse", () => {
-  const standaloneProviderKey = "sk-or-v1-0123456789abcdef0123456789abcdef";
-  const text = redactTextForModel(`Bearer top-secret API_KEY=another-secret password="do-not-send with spaces" client_secret: third-secret senha=senha-local segredo:segredo-local chave=chave-local credenciais:credencial-local ${standaloneProviderKey}`);
-  assert.equal(text.includes("top-secret"), false);
-  assert.equal(text.includes("another-secret"), false);
-  assert.equal(text.includes("do-not-send"), false);
-  assert.equal(text.includes("with spaces"), false);
-  assert.equal(text.includes("third-secret"), false);
-  assert.equal(text.includes("senha-local"), false);
-  assert.equal(text.includes("segredo-local"), false);
-  assert.equal(text.includes("chave-local"), false);
-  assert.equal(text.includes("credencial-local"), false);
-  assert.equal(text.includes(standaloneProviderKey), false);
-  assert.equal(text.includes("[REDACTED]"), true);
-  assert.deepEqual(redactJsonForModel({
-    authorization: "Bearer hidden",
-    nested: {
-      token: "nested-secret",
-      password: "nested-password",
-      senha: "nested-password-portuguese",
-      segredo: "nested-secret-portuguese",
-      chave: "nested-key-portuguese",
-      credenciais: "nested-credential-portuguese",
-      safe: "ok",
-    },
-  }), {
-    authorization: "[REDACTED]",
-    nested: {
-      token: "[REDACTED]",
-      password: "[REDACTED]",
-      senha: "[REDACTED]",
-      segredo: "[REDACTED]",
-      chave: "[REDACTED]",
-      credenciais: "[REDACTED]",
-      safe: "ok",
-    },
-  });
-});
-
-test("core-facing effect labels agree with the Rust policy table", () => {
-  // crates/policy/src/lib.rs classifies desktop.act as Write; the descriptive
-  // label shown to the model and UI must not disagree with it.
-  assert.equal(displayEffectForTool("desktop.act"), "write");
-  assert.equal(displayEffectForTool("shell.exec"), "arbitrary");
-  assert.equal(displayEffectForTool("apps.launch"), "external");
-  assert.equal(displayEffectForTool("clipboard.write"), "write");
-});
-
-test("cancelled SSE streams surface as CANCELLED, not retryable network errors", async () => {
-  const provider = new OpenAICompatibleTextProvider({ baseUrl: "http://127.0.0.1:1", model: "test-model" });
-  const controller = new AbortController();
-  const reader = {
-    read: async () => {
-      controller.abort();
-      throw new Error("The operation was aborted");
-    },
-  } as unknown as ReadableStreamDefaultReader<Uint8Array>;
-  await withMockedFetch(streamingResponse(() => reader), async () => {
-    await assert.rejects(async () => {
-      for await (const _chunk of provider.stream("oi", controller.signal)) {
-        // The abort must be classified before any chunk is produced.
-      }
-    }, (error) => error instanceof ProviderError
-      && error.code === "CANCELLED"
-      && error.retryable === false);
-  });
-});
-
-test("MODEL_MISMATCH-shaped responses keep upstream text classified by status", async () => {
-  const server = await startServer(() => ({ status: 500, body: "boom" }));
-  try {
-    const provider = new OpenAICompatibleTextProvider({ baseUrl: server.url, model: "test-model" });
-    await assert.rejects(async () => {
-      for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
-        // The request is expected to fail before producing a chunk.
-      }
-    }, (error) => error instanceof ProviderError && error.code === "PROVIDER_ERROR" && error.retryable === true);
-  } finally {
-    await server.close();
+    try {
+      const planner = new OpenAICompatibleTextPlanner({ baseUrl: api.baseUrl, apiKey: "test", model: "text" });
+      const result = planner.proposeCandidates({
+        task: { objective: "listar", app_hints: [], targets: [], expected_result: "lista" },
+        state: "estado", tools: [],
+      }, new AbortController().signal);
+      if (repairSucceeds) assert.equal((await result)[0]?.tool, "desktop.list_windows");
+      else await assert.rejects(result, /verification deve ser texto/u);
+      assert.equal(calls, 2);
+    } finally { await api.close(); }
   }
 });

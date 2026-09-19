@@ -22,6 +22,18 @@ secretas.
 
 Probe real local: `cargo run -p vox-desktop-access --example native_probe` enumerou janelas do GNOME, Codex, Discord, terminal e navegador na sessão Wayland, com ids de janela repetíveis entre duas observações. A saída publica apenas contagens, papéis, estados, bounds e ids opacos, nunca o texto cru de janelas externas.
 
+Atualização de 18/09/2026: alguns processos Electron aparecem no AT-SPI já com
+papel `Window` ou `Dialog`, em vez de expor uma aplicação que contém janelas.
+O adapter passou a tratar essa raiz como um elemento percorrível para snapshot
+e resolução de referência; antes, preservava somente a raiz sem descendentes.
+O probe confirmou que o Discord nesta sessão foi iniciado sem a bridge de
+acessibilidade do renderer. A observação direcionada devolve o diagnóstico
+Chromium/Electron que solicita reinício com `--force-renderer-accessibility`,
+em vez de relatar uma raiz truncada como se fosse uma busca sem resultado. O
+core encerra esse caso sem repetição e deixa explícito que nenhuma mensagem foi
+enviada. Esse aplicativo permanece fora do alcance da automação até ser
+reiniciado com uma árvore de acessibilidade fornecida por ele.
+
 O teste ignorado `crates/desktop-access/tests/native_fixture.rs` inicia uma
 fixture GTK controlada e prova no AT-SPI real Linux a enumeração direcionada
 por PID, nomes duplicados sem resolução arbitrária, senha e token em português

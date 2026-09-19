@@ -74,8 +74,6 @@ fn start_vox() -> VoxProcess {
     fs::create_dir_all(&data_dir).expect("temporary Vox data directory should be created");
     let child = Command::new(env!("CARGO_BIN_EXE_vox-desktop"))
         .env("VOX_DATA_DIR", &data_dir)
-        .env("VOX_PROVIDER", "fake")
-        .env("VOX_PROVIDER_API_KEY", "")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

@@ -1,4 +1,6 @@
-use rusqlite::{backup::Backup, params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    backup::Backup, params, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -69,21 +71,20 @@ pub struct EffectRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApprovalRecord {
+pub struct TaskGrantRecord {
     pub id: String,
     pub run_id: String,
-    pub call_id: String,
-    pub args_hash: String,
-    pub scope: String,
+    pub request_hash: String,
     pub expires_at: u64,
     pub state: String,
+    pub limits: String,
 }
 
 pub struct SessionStore {
     connection: Connection,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 impl SessionStore {
     /// Compatibility opener for offline users. Refuse recovery while any desktop
@@ -99,8 +100,7 @@ impl SessionStore {
         owner_id: &str,
         stale_after: Duration,
     ) -> Result<Self, StoreError> {
-        Self::open_owned(path.as_ref(), Some((owner_id, stale_after)))
-            .map_err(classify_store_error)
+        Self::open_owned(path.as_ref(), Some((owner_id, stale_after))).map_err(classify_store_error)
     }
 
     fn open_owned(path: &Path, owner: Option<(&str, Duration)>) -> Result<Self, StoreError> {
@@ -111,7 +111,8 @@ impl SessionStore {
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let store = Self { connection };
         {
-            let transaction = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)?;
+            let transaction =
+                Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)?;
             store.connection.execute_batch(
                 "CREATE TABLE IF NOT EXISTS desktop_lease(id INTEGER PRIMARY KEY CHECK (id = 1), owner_id TEXT NOT NULL, heartbeat_at INTEGER NOT NULL);"
             ).map_err(classify_sql_error)?;
@@ -122,7 +123,11 @@ impl SessionStore {
                     }
                 }
                 None => {
-                    let count: i64 = store.connection.query_row("SELECT COUNT(*) FROM desktop_lease", [], |row| row.get(0))?;
+                    let count: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM desktop_lease",
+                        [],
+                        |row| row.get(0),
+                    )?;
                     if count != 0 {
                         return Err(StoreError::LeaseNotOwned);
                     }
@@ -157,13 +162,9 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS runs_session_state ON runs(session_id, state);",
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
-        // Version 2 adds the durable, non-secret preference and approval
-        // records. Approval rows are audit state only; authorization tokens
-        // remain short-lived in memory and are never reconstructed on boot.
+        // Version 2 adds durable, non-secret preferences.
         self.connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL, schema_version INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, call_id TEXT NOT NULL, args_hash TEXT NOT NULL, scope TEXT NOT NULL, expires_at TEXT NOT NULL, state TEXT NOT NULL);
-             CREATE INDEX IF NOT EXISTS approvals_run_state ON approvals(run_id, state);",
+            "CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL, schema_version INTEGER NOT NULL);",
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
         self.connection.execute_batch(
@@ -183,9 +184,20 @@ impl SessionStore {
         self.connection.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS runs_delete_journal BEFORE DELETE ON runs BEGIN
                  DELETE FROM effects WHERE run_id=OLD.id;
-                 DELETE FROM approvals WHERE run_id=OLD.id;
              END;
-             CREATE INDEX IF NOT EXISTS effects_run ON effects(run_id);"
+             CREATE INDEX IF NOT EXISTS effects_run ON effects(run_id);",
+        )?;
+        // Version 6 removes obsolete per-call metadata and records one grant
+        // for each explicit user task.
+        self.connection.execute_batch(
+            "DROP TRIGGER IF EXISTS runs_delete_journal;
+             DROP TABLE IF EXISTS approvals;
+             CREATE TABLE IF NOT EXISTS task_grants(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, request_hash TEXT NOT NULL, expires_at TEXT NOT NULL, state TEXT NOT NULL, limits TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS task_grants_run_state ON task_grants(run_id, state);
+             CREATE TRIGGER IF NOT EXISTS runs_delete_journal BEFORE DELETE ON runs BEGIN
+                 DELETE FROM effects WHERE run_id=OLD.id;
+                 DELETE FROM task_grants WHERE run_id=OLD.id;
+             END;"
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", params![CURRENT_SCHEMA_VERSION])?;
         Ok(())
@@ -357,7 +369,8 @@ impl SessionStore {
         model_ref: Option<&str>,
         content: &str,
     ) -> Result<(RunRecord, Vec<ModelContextMessage>), StoreError> {
-        let transaction = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         if !self.renew_desktop_lease(owner_id)? {
             return Err(StoreError::LeaseNotOwned);
         }
@@ -404,7 +417,7 @@ impl SessionStore {
         let changed = self.connection.execute("UPDATE runs SET state='interrupted', finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('running','executing','thinking','receiving','cancelling')", [])?;
         self.reconcile_pending_effects(None)?;
         self.connection.execute(
-            "UPDATE approvals SET state='invalidated' WHERE state='pending'",
+            "UPDATE task_grants SET state='interrupted' WHERE state='active'",
             [],
         )?;
         Ok(changed)
@@ -602,44 +615,47 @@ impl SessionStore {
             .optional()?)
     }
 
-    pub fn record_approval(&self, record: &ApprovalRecord) -> Result<(), StoreError> {
+    pub fn delete_preference(&self, key: &str) -> Result<(), StoreError> {
+        self.connection
+            .execute("DELETE FROM preferences WHERE key=?1", params![key])?;
+        Ok(())
+    }
+
+    pub fn record_task_grant(&self, record: &TaskGrantRecord) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT OR REPLACE INTO approvals(id,run_id,call_id,args_hash,scope,expires_at,state) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT OR REPLACE INTO task_grants(id,run_id,request_hash,expires_at,state,limits,created_at) VALUES (?1,?2,?3,?4,?5,?6,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             params![
                 record.id,
                 record.run_id,
-                record.call_id,
-                record.args_hash,
-                record.scope,
+                record.request_hash,
                 record.expires_at.to_string(),
                 record.state,
+                record.limits,
             ],
         )?;
         Ok(())
     }
 
-    pub fn set_approval_state(&self, approval_id: &str, state: &str) -> Result<(), StoreError> {
+    pub fn set_task_grant_state(&self, grant_id: &str, state: &str) -> Result<(), StoreError> {
         self.connection.execute(
-            "UPDATE approvals SET state=?1 WHERE id=?2",
-            params![state, approval_id],
+            "UPDATE task_grants SET state=?1 WHERE id=?2",
+            params![state, grant_id],
         )?;
         Ok(())
     }
 
-    pub fn approvals_for_run(&self, run_id: &str) -> Result<Vec<ApprovalRecord>, StoreError> {
+    pub fn task_grants_for_run(&self, run_id: &str) -> Result<Vec<TaskGrantRecord>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,run_id,call_id,args_hash,scope,expires_at,state FROM approvals WHERE run_id=?1 ORDER BY expires_at ASC",
+            "SELECT id,run_id,request_hash,expires_at,state,limits FROM task_grants WHERE run_id=?1 ORDER BY expires_at ASC",
         )?;
         let rows = statement.query_map(params![run_id], |row| {
-            let expires_at = row.get::<_, String>(5)?.parse::<u64>().unwrap_or_default();
-            Ok(ApprovalRecord {
+            Ok(TaskGrantRecord {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
-                call_id: row.get(2)?,
-                args_hash: row.get(3)?,
-                scope: row.get(4)?,
-                expires_at,
-                state: row.get(6)?,
+                request_hash: row.get(2)?,
+                expires_at: row.get::<_, String>(3)?.parse::<u64>().unwrap_or_default(),
+                state: row.get(4)?,
+                limits: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1043,7 +1059,7 @@ mod tests {
         let store = SessionStore::open_in_memory().unwrap();
         let session = store.create_session("test").unwrap();
         store.append_message(&session, "user", "hello", 1).unwrap();
-        let run = store.start_run(&session, Some("fake-text")).unwrap();
+        let run = store.start_run(&session, Some("text-model")).unwrap();
         assert_eq!(store.recover_interrupted().unwrap(), 1);
         assert_eq!(store.messages(&session).unwrap()[0].content, "hello");
         store.finish_run(&run.id, "cancelled").unwrap();
@@ -1165,14 +1181,13 @@ mod tests {
             assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
             store.set_preference("theme", "dark", 1).unwrap();
             store
-                .record_approval(&ApprovalRecord {
-                    id: "approval-1".into(),
+                .record_task_grant(&TaskGrantRecord {
+                    id: "grant-1".into(),
                     run_id: "run-1".into(),
-                    call_id: "call-1".into(),
-                    args_hash: "hash".into(),
-                    scope: "run:run-1".into(),
+                    request_hash: "hash".into(),
                     expires_at: 123,
-                    state: "pending".into(),
+                    state: "active".into(),
+                    limits: "roots".into(),
                 })
                 .unwrap();
         }
@@ -1181,8 +1196,8 @@ mod tests {
             assert_eq!(store.preference("theme").unwrap().as_deref(), Some("dark"));
             assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
             assert_eq!(
-                store.approvals_for_run("run-1").unwrap()[0].state,
-                "invalidated"
+                store.task_grants_for_run("run-1").unwrap()[0].state,
+                "interrupted"
             );
         }
         let _ = std::fs::remove_file(path);
@@ -1352,7 +1367,7 @@ mod tests {
     fn session_search_paginates_and_reports_latest_run_state() {
         let store = SessionStore::open_in_memory().unwrap();
         let alpha = store.create_session("Alpha").unwrap();
-        let run = store.start_run(&alpha, Some("fake-text")).unwrap();
+        let run = store.start_run(&alpha, Some("text-model")).unwrap();
         store.finish_run(&run.id, "completed").unwrap();
         let _beta = store.create_session("Beta").unwrap();
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{atomic::AtomicBool, Mutex};
 use std::time::{Duration, Instant};
@@ -8,16 +8,16 @@ use thiserror::Error;
 use vox_desktop_access::{
     is_sensitive_semantic_node, query_snapshot, NativeDesktop, SemanticQuery, SemanticSnapshot,
 };
-use vox_policy::{Decision, PolicyEngine, PolicyError};
+use vox_policy::{PolicyEngine, PolicyError};
 use vox_tool_runtime::{RuntimeConfig, ToolError, ToolRuntime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrokerCall {
     pub call_id: String,
     pub run_id: String,
+    pub task_grant_id: String,
     pub tool: String,
     pub arguments: Value,
-    pub authorization_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,15 +29,6 @@ pub struct BrokerResult {
     pub retryable: bool,
     pub side_effect: String,
     pub verification: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApprovalRequest {
-    pub approval_id: String,
-    pub expires_at: u64,
-    pub args_hash: String,
-    pub scope: String,
-    pub summary: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -52,10 +43,235 @@ pub enum BrokerError {
     Desktop(String),
     #[error("desktop snapshot is missing, expired, already used, or belongs to another run")]
     SnapshotUnavailable,
+    #[error("task grant is missing, expired, or belongs to another run")]
+    TaskGrantUnavailable,
+    #[error("the requested tool or target is outside the active task grant")]
+    TaskGrantOutOfScope,
+    #[error("the requested desktop field is sensitive and cannot be written")]
+    SensitiveDesktopField,
 }
 
 const MAX_ISSUED_SNAPSHOTS: usize = 64;
 const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+const TASK_GRANT_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskGrant {
+    pub id: String,
+    pub run_id: String,
+    pub request_hash: String,
+    pub expires_at: u64,
+    pub allowed_tools: BTreeSet<String>,
+}
+
+struct ActiveTaskGrant {
+    grant: TaskGrant,
+    created: Instant,
+    observed_app_pids: BTreeSet<u32>,
+    resolved_programs: BTreeSet<String>,
+    observed_processes: BTreeMap<u32, (String, Option<u64>)>,
+}
+
+#[derive(Default)]
+struct TaskGrantRegistry {
+    grants: Mutex<BTreeMap<String, ActiveTaskGrant>>,
+}
+
+impl TaskGrantRegistry {
+    fn begin(
+        &self,
+        run_id: &str,
+        request_hash: &str,
+        allowed_tools: impl IntoIterator<Item = String>,
+    ) -> TaskGrant {
+        let grant = TaskGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_owned(),
+            request_hash: request_hash.to_owned(),
+            expires_at: std::time::SystemTime::now()
+                .checked_add(TASK_GRANT_TTL)
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+            allowed_tools: allowed_tools.into_iter().collect(),
+        };
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.retain(|_, active| active.created.elapsed() < TASK_GRANT_TTL);
+            grants.insert(
+                grant.id.clone(),
+                ActiveTaskGrant {
+                    grant: grant.clone(),
+                    created: Instant::now(),
+                    observed_app_pids: BTreeSet::new(),
+                    resolved_programs: BTreeSet::new(),
+                    observed_processes: BTreeMap::new(),
+                },
+            );
+        }
+        grant
+    }
+
+    fn active<'a>(
+        grants: &'a mut BTreeMap<String, ActiveTaskGrant>,
+        run_id: &str,
+        grant_id: &str,
+    ) -> Result<&'a mut ActiveTaskGrant, BrokerError> {
+        let Some(active) = grants.get_mut(grant_id) else {
+            return Err(BrokerError::TaskGrantUnavailable);
+        };
+        if active.grant.run_id != run_id || active.created.elapsed() >= TASK_GRANT_TTL {
+            return Err(BrokerError::TaskGrantUnavailable);
+        }
+        Ok(active)
+    }
+
+    fn authorize(&self, run_id: &str, grant_id: &str, tool: &str) -> Result<(), BrokerError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| BrokerError::TaskGrantUnavailable)?;
+        let active = Self::active(&mut grants, run_id, grant_id)?;
+        if !active.grant.allowed_tools.contains(tool) {
+            return Err(BrokerError::TaskGrantOutOfScope);
+        }
+        Ok(())
+    }
+
+    fn remember_windows(&self, run_id: &str, grant_id: &str, data: &Value) {
+        let Ok(mut grants) = self.grants.lock() else {
+            return;
+        };
+        let Ok(active) = Self::active(&mut grants, run_id, grant_id) else {
+            return;
+        };
+        for pid in data
+            .get("windows")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|window| window.get("app_pid").and_then(Value::as_u64))
+            .filter_map(|pid| u32::try_from(pid).ok())
+        {
+            active.observed_app_pids.insert(pid);
+        }
+    }
+
+    fn require_observed_app(
+        &self,
+        run_id: &str,
+        grant_id: &str,
+        pid: u32,
+    ) -> Result<(), BrokerError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| BrokerError::TaskGrantUnavailable)?;
+        if Self::active(&mut grants, run_id, grant_id)?
+            .observed_app_pids
+            .contains(&pid)
+        {
+            Ok(())
+        } else {
+            Err(BrokerError::TaskGrantOutOfScope)
+        }
+    }
+
+    fn remember_resolved_program(&self, run_id: &str, grant_id: &str, data: &Value) {
+        let Ok(mut grants) = self.grants.lock() else {
+            return;
+        };
+        let Ok(active) = Self::active(&mut grants, run_id, grant_id) else {
+            return;
+        };
+        if let Some(program) = data.get("program").and_then(Value::as_str) {
+            active.resolved_programs.insert(program.to_owned());
+        }
+    }
+
+    fn require_resolved_program(
+        &self,
+        run_id: &str,
+        grant_id: &str,
+        program: &str,
+    ) -> Result<(), BrokerError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| BrokerError::TaskGrantUnavailable)?;
+        if Self::active(&mut grants, run_id, grant_id)?
+            .resolved_programs
+            .contains(program)
+        {
+            Ok(())
+        } else {
+            Err(BrokerError::TaskGrantOutOfScope)
+        }
+    }
+
+    fn remember_processes(&self, run_id: &str, grant_id: &str, data: &Value) {
+        let Ok(mut grants) = self.grants.lock() else {
+            return;
+        };
+        let Ok(active) = Self::active(&mut grants, run_id, grant_id) else {
+            return;
+        };
+        for process in data
+            .get("processes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(pid) = process
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+            else {
+                continue;
+            };
+            let Some(command) = process.get("command").and_then(Value::as_str) else {
+                continue;
+            };
+            active.observed_processes.insert(
+                pid,
+                (
+                    command.to_owned(),
+                    process.get("start_time").and_then(Value::as_u64),
+                ),
+            );
+        }
+    }
+
+    fn require_observed_process(
+        &self,
+        run_id: &str,
+        grant_id: &str,
+        pid: u32,
+        command: Option<&str>,
+        start_time: Option<u64>,
+    ) -> Result<(), BrokerError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| BrokerError::TaskGrantUnavailable)?;
+        let Some((observed_command, observed_start)) = Self::active(&mut grants, run_id, grant_id)?
+            .observed_processes
+            .get(&pid)
+        else {
+            return Err(BrokerError::TaskGrantOutOfScope);
+        };
+        if command == Some(observed_command.as_str()) && start_time == *observed_start {
+            Ok(())
+        } else {
+            Err(BrokerError::TaskGrantOutOfScope)
+        }
+    }
+
+    fn finish(&self, grant_id: &str) {
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.remove(grant_id);
+        }
+    }
+}
 
 fn optional_desktop_app_pid(
     arguments: &Map<String, Value>,
@@ -158,6 +374,7 @@ pub struct Broker {
     runtime: ToolRuntime,
     desktop: NativeDesktop,
     snapshots: SnapshotRegistry,
+    grants: TaskGrantRegistry,
 }
 
 impl Default for Broker {
@@ -173,7 +390,23 @@ impl Broker {
             runtime: ToolRuntime::new(config),
             desktop: NativeDesktop::default(),
             snapshots: SnapshotRegistry::default(),
+            grants: TaskGrantRegistry::default(),
         }
+    }
+
+    /// The desktop creates this grant only after the user submits a task.
+    /// It is invalidated at the terminal run state.
+    pub fn begin_task_grant(
+        &self,
+        run_id: &str,
+        request_hash: &str,
+        allowed_tools: impl IntoIterator<Item = String>,
+    ) -> TaskGrant {
+        self.grants.begin(run_id, request_hash, allowed_tools)
+    }
+
+    pub fn finish_task_grant(&self, grant_id: &str) {
+        self.grants.finish(grant_id);
     }
 
     pub fn execute(&self, call: &BrokerCall) -> Result<BrokerResult, BrokerError> {
@@ -185,27 +418,26 @@ impl Broker {
         call: &BrokerCall,
         cancel: &AtomicBool,
     ) -> Result<BrokerResult, BrokerError> {
-        match self.policy.authorize_ref(
-            &call.tool,
-            &call.arguments,
-            &format!("run:{}", call.run_id),
-            call.authorization_ref.as_deref(),
-        ) {
-            Ok(Decision::Allow) => {}
-            Ok(Decision::RequireApproval) | Err(PolicyError::ApprovalRequired) => {
-                return Ok(Self::approval_required())
-            }
-            Err(PolicyError::InvalidApproval) => return Ok(Self::invalid_approval()),
-            Err(error) => return Err(BrokerError::Policy(error)),
-        }
+        self.grants
+            .authorize(&call.run_id, &call.task_grant_id, &call.tool)?;
+        self.policy.validate(&call.tool, &call.arguments)?;
         let result = match call.tool.as_str() {
-            "desktop.list_windows" => self.runtime.list_windows()?,
+            "desktop.list_windows" => {
+                let result = self.runtime.list_windows()?;
+                self.grants
+                    .remember_windows(&call.run_id, &call.task_grant_id, &result.data);
+                result
+            }
             "desktop.snapshot" => {
                 let object = call
                     .arguments
                     .as_object()
                     .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
                 let app_pid = optional_desktop_app_pid(object, &call.tool)?;
+                if let Some(pid) = app_pid {
+                    self.grants
+                        .require_observed_app(&call.run_id, &call.task_grant_id, pid)?;
+                }
                 let mut snapshots = self
                     .desktop
                     .snapshots_for_app_pid(app_pid)
@@ -334,6 +566,15 @@ impl Broker {
                     .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
                 let value = object.get("value").and_then(Value::as_str);
                 let snapshot = self.snapshots.take_for_action(&call.run_id, snapshot_id)?;
+                if matches!(action, "set_value" | "set-value")
+                    && snapshot
+                        .nodes
+                        .iter()
+                        .find(|node| node.element_ref == element_ref)
+                        .is_some_and(is_sensitive_semantic_node)
+                {
+                    return Err(BrokerError::SensitiveDesktopField);
+                }
                 let data = self
                     .desktop
                     .act(&snapshot, element_ref, action, value)
@@ -433,7 +674,10 @@ impl Broker {
                     .and_then(|object| object.get("limit"))
                     .and_then(Value::as_u64)
                     .unwrap_or(200) as usize;
-                self.runtime.list_processes(limit)?
+                let result = self.runtime.list_processes(limit)?;
+                self.grants
+                    .remember_processes(&call.run_id, &call.task_grant_id, &result.data);
+                result
             }
             "process.terminate" => {
                 let object = call
@@ -447,6 +691,13 @@ impl Broker {
                     as u32;
                 let expected = object.get("command").and_then(Value::as_str);
                 let start_time = object.get("start_time").and_then(Value::as_u64);
+                self.grants.require_observed_process(
+                    &call.run_id,
+                    &call.task_grant_id,
+                    pid,
+                    expected,
+                    start_time,
+                )?;
                 self.runtime
                     .terminate_process_with_identity(pid, expected, start_time)?
             }
@@ -470,6 +721,8 @@ impl Broker {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                self.grants
+                    .require_resolved_program(&call.run_id, &call.task_grant_id, program)?;
                 self.runtime.launch_app(program, &args)?
             }
             "apps.resolve" => {
@@ -481,7 +734,13 @@ impl Broker {
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
-                self.runtime.resolve_app(name)?
+                let result = self.runtime.resolve_app(name)?;
+                self.grants.remember_resolved_program(
+                    &call.run_id,
+                    &call.task_grant_id,
+                    &result.data,
+                );
+                result
             }
             "paths.open" => {
                 let object = call
@@ -544,544 +803,66 @@ impl Broker {
             verification: result.verification,
         })
     }
-
-    /// Create a short-lived approval for this exact call and execute it. The
-    /// UI must call this only after the user has explicitly confirmed the
-    /// displayed tool, target and consequence.
-    pub fn execute_with_approval(&self, call: &BrokerCall) -> Result<BrokerResult, BrokerError> {
-        let approval = self.request_approval(call)?;
-        let mut authorized = call.clone();
-        authorized.authorization_ref = Some(approval.approval_id);
-        self.execute(&authorized)
-    }
-
-    pub fn request_approval(&self, call: &BrokerCall) -> Result<ApprovalRequest, BrokerError> {
-        let summary = self.approval_summary(call)?;
-        let token = self.policy.issue_approval(
-            &call.tool,
-            &call.arguments,
-            format!("run:{}", call.run_id),
-            Duration::from_secs(60),
-        )?;
-        Ok(ApprovalRequest {
-            approval_id: token.approval_id.to_string(),
-            expires_at: PolicyEngine::approval_expiry_epoch(&token),
-            args_hash: token.args_hash,
-            scope: token.scope,
-            summary,
-        })
-    }
-
-    fn approval_summary(&self, call: &BrokerCall) -> Result<Option<String>, BrokerError> {
-        let object = call
-            .arguments
-            .as_object()
-            .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
-        match call.tool.as_str() {
-            "files.write" => {
-                let path = object
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("arquivo");
-                let verb = if object.get("overwrite").and_then(Value::as_bool) == Some(true) {
-                    "sobrescrever"
-                } else {
-                    "criar ou escrever"
-                };
-                return Ok(Some(format!("{verb} {}", truncate_for_approval(path, 160))));
-            }
-            "files.move" => {
-                let source = object
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or("origem");
-                let destination = object
-                    .get("destination")
-                    .and_then(Value::as_str)
-                    .unwrap_or("destino");
-                return Ok(Some(format!(
-                    "mover {} para {}",
-                    truncate_for_approval(source, 96),
-                    truncate_for_approval(destination, 96)
-                )));
-            }
-            "clipboard.write" => return Ok(Some("alterar a área de transferência".into())),
-            "process.terminate" => {
-                let pid = object
-                    .get("pid")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default();
-                return Ok(Some(format!("encerrar o processo {pid}")));
-            }
-            "apps.launch" => {
-                let program = object
-                    .get("program")
-                    .and_then(Value::as_str)
-                    .unwrap_or("aplicativo");
-                return Ok(Some(format!(
-                    "abrir {}",
-                    truncate_for_approval(program, 160)
-                )));
-            }
-            "paths.open" => {
-                let path = object
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("caminho");
-                return Ok(Some(format!("abrir {}", truncate_for_approval(path, 160))));
-            }
-            "shell.exec" => {
-                let program = object
-                    .get("program")
-                    .and_then(Value::as_str)
-                    .unwrap_or("programa");
-                return Ok(Some(format!(
-                    "executar {}",
-                    truncate_for_approval(program, 160)
-                )));
-            }
-            "desktop.act" => {}
-            _ => return Ok(None),
-        }
-        let snapshot_id = object
-            .get("snapshot_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
-        let element_ref = object
-            .get("element_ref")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
-        let action = object
-            .get("action")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BrokerError::ArgumentsNotObject(call.tool.clone()))?;
-        let snapshot = self.snapshots.get(&call.run_id, snapshot_id)?;
-        let node = snapshot
-            .nodes
-            .iter()
-            .find(|node| node.element_ref == element_ref)
-            .ok_or(BrokerError::SnapshotUnavailable)?;
-        let sensitive = is_sensitive_semantic_node(node);
-        if sensitive && matches!(action, "set_value" | "set-value") {
-            return Err(BrokerError::Desktop(
-                "editing a sensitive accessibility field is not supported".into(),
-            ));
-        }
-        let name = if sensitive {
-            "conteúdo sensível".into()
-        } else if node.name.trim().is_empty() {
-            node.role.clone()
-        } else {
-            truncate_for_approval(&node.name, 160)
-        };
-        Ok(Some(format!(
-            "{} em {}",
-            approval_action_label(action),
-            name
-        )))
-    }
-
-    pub fn revoke_approval(&self, approval_id: &str) -> Result<(), BrokerError> {
-        self.policy.revoke_approval(approval_id)?;
-        Ok(())
-    }
-
-    fn approval_required() -> BrokerResult {
-        BrokerResult {
-            status: "error".into(),
-            data: Value::Null,
-            error_code: Some("APPROVAL_REQUIRED".into()),
-            error: Some("a user approval scoped to this exact call is required".into()),
-            retryable: false,
-            side_effect: "none".into(),
-            verification: None,
-        }
-    }
-
-    fn invalid_approval() -> BrokerResult {
-        BrokerResult {
-            status: "error".into(),
-            data: Value::Null,
-            error_code: Some("INVALID_APPROVAL".into()),
-            error: Some("approval is expired, mismatched, or already used".into()),
-            retryable: false,
-            side_effect: "none".into(),
-            verification: None,
-        }
-    }
-}
-
-fn truncate_for_approval(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let visible = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{visible}…")
-    } else {
-        visible
-    }
-}
-
-fn approval_action_label(action: &str) -> &str {
-    match action {
-        "press" => "pressionar",
-        "focus" => "focar",
-        "toggle" => "alternar",
-        "set_value" | "set-value" => "preencher",
-        _ => action,
-    }
 }
 
 #[cfg(test)]
-mod tests {
+mod task_grant_tests {
     use super::*;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn issued_snapshot(snapshot_id: &str) -> SemanticSnapshot {
-        SemanticSnapshot {
-            snapshot_id: snapshot_id.into(),
-            captured_at: "0".into(),
-            generation: 1,
-            app_id: "fixture-app:1".into(),
-            window_id: "fixture-window".into(),
-            focused_element: None,
-            capabilities: vec!["query".into()],
-            nodes: Vec::new(),
-            truncated: false,
-            continuation: None,
-        }
-    }
 
     #[test]
-    fn desktop_app_pid_scope_requires_a_positive_u32() {
-        let valid = serde_json::json!({"app_pid": 42});
-        assert_eq!(
-            optional_desktop_app_pid(valid.as_object().unwrap(), "desktop.snapshot").unwrap(),
-            Some(42)
-        );
-        for invalid in [
-            serde_json::json!({"app_pid": 0}),
-            serde_json::json!({"app_pid": -1}),
-            serde_json::json!({"app_pid": u64::from(u32::MAX) + 1}),
-            serde_json::json!({"app_pid": "42"}),
-        ] {
-            assert!(matches!(
-                optional_desktop_app_pid(invalid.as_object().unwrap(), "desktop.snapshot"),
-                Err(BrokerError::ArgumentsNotObject(tool)) if tool == "desktop.snapshot"
-            ));
-        }
-    }
-
-    #[test]
-    fn read_tool_is_executed_only_by_the_broker() {
+    fn grant_is_bound_to_its_run_and_cannot_be_replayed() {
         let broker = Broker::default();
+        let grant = broker.begin_task_grant("run-a", "request-hash", ["process.list".to_owned()]);
         let call = BrokerCall {
-            call_id: "c".into(),
-            run_id: "r".into(),
-            tool: "shell.exec".into(),
-            arguments: serde_json::json!({"program":"printf","argv":["ok"]}),
-            authorization_ref: None,
-        };
-        let result = broker.execute(&call).unwrap();
-        assert_eq!(result.error_code.as_deref(), Some("APPROVAL_REQUIRED"));
-    }
-
-    #[test]
-    fn accessibility_snapshots_are_bound_to_a_run_and_consumed_by_actions() {
-        let registry = SnapshotRegistry::default();
-        registry.replace_for_run("run-a", [issued_snapshot("snapshot-a")]);
-
-        assert_eq!(
-            registry.get("run-a", "snapshot-a").unwrap().snapshot_id,
-            "snapshot-a"
-        );
-        assert!(matches!(
-            registry.get("run-b", "snapshot-a"),
-            Err(BrokerError::SnapshotUnavailable)
-        ));
-
-        // A mismatched run cannot destroy the issuing run's observation.
-        assert_eq!(
-            registry
-                .take_for_action("run-a", "snapshot-a")
-                .unwrap()
-                .snapshot_id,
-            "snapshot-a"
-        );
-        assert!(matches!(
-            registry.get("run-a", "snapshot-a"),
-            Err(BrokerError::SnapshotUnavailable)
-        ));
-    }
-
-    #[test]
-    fn fabricated_snapshot_ids_are_rejected_before_desktop_access() {
-        let broker = Broker::default();
-        let call = BrokerCall {
-            call_id: "query-fabricated".into(),
-            run_id: "run-fabricated".into(),
-            tool: "desktop.query".into(),
-            arguments: serde_json::json!({
-                "snapshot_id": "not-issued-by-broker",
-                "query": {"role": "button"}
-            }),
-            authorization_ref: None,
+            call_id: "call-a".into(),
+            run_id: "run-b".into(),
+            task_grant_id: grant.id.clone(),
+            tool: "process.list".into(),
+            arguments: serde_json::json!({"limit": 1}),
         };
         assert!(matches!(
             broker.execute(&call),
-            Err(BrokerError::SnapshotUnavailable)
+            Err(BrokerError::TaskGrantUnavailable)
+        ));
+        broker.finish_task_grant(&grant.id);
+        let call = BrokerCall {
+            run_id: "run-a".into(),
+            ..call
+        };
+        assert!(matches!(
+            broker.execute(&call),
+            Err(BrokerError::TaskGrantUnavailable)
         ));
     }
 
     #[test]
-    fn desktop_approval_has_a_broker_derived_target_summary() {
-        use vox_desktop_access::SemanticNode;
-
+    fn active_grant_executes_registered_read_tools_without_a_modal() {
         let broker = Broker::default();
-        let mut snapshot = issued_snapshot("snapshot-for-approval");
-        snapshot.nodes.push(SemanticNode {
-            element_ref: "button-save".into(),
-            parent_ref: None,
-            role: "button".into(),
-            name: "Salvar alterações".into(),
-            value: None,
-            states: vec!["enabled".into()],
-            actions: vec!["press".into()],
-            bounds: None,
-        });
-        broker.snapshots.replace_for_run("run-approval", [snapshot]);
+        let grant = broker.begin_task_grant("run-a", "request-hash", ["process.list".to_owned()]);
         let call = BrokerCall {
-            call_id: "act-save".into(),
-            run_id: "run-approval".into(),
-            tool: "desktop.act".into(),
-            arguments: serde_json::json!({
-                "snapshot_id": "snapshot-for-approval",
-                "element_ref": "button-save",
-                "action": "press"
-            }),
-            authorization_ref: None,
+            call_id: "call-a".into(),
+            run_id: "run-a".into(),
+            task_grant_id: grant.id,
+            tool: "process.list".into(),
+            arguments: serde_json::json!({"limit": 1}),
         };
-
-        let approval = broker.request_approval(&call).unwrap();
-        assert_eq!(
-            approval.summary.as_deref(),
-            Some("pressionar em Salvar alterações")
-        );
+        assert_eq!(broker.execute(&call).unwrap().status, "success");
     }
 
     #[test]
-    fn sensitive_accessibility_fields_cannot_be_filled_by_the_model() {
-        use vox_desktop_access::SemanticNode;
-
+    fn grant_rejects_a_tool_outside_the_explicit_task_scope() {
         let broker = Broker::default();
-        for (index, (name, states)) in [
-            ("Password", vec!["password".into()]),
-            ("Senha do provedor", vec!["enabled".into()]),
-            ("Token de acesso", vec!["enabled".into()]),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let run_id = format!("run-sensitive-{index}");
-            let snapshot_id = format!("snapshot-sensitive-{index}");
-            let element_ref = format!("sensitive-field-{index}");
-            let mut snapshot = issued_snapshot(&snapshot_id);
-            snapshot.nodes.push(SemanticNode {
-                element_ref: element_ref.clone(),
-                parent_ref: None,
-                role: "textfield".into(),
-                name: name.into(),
-                value: Some("[REDACTED]".into()),
-                states,
-                actions: vec!["set-value".into()],
-                bounds: None,
-            });
-            broker.snapshots.replace_for_run(&run_id, [snapshot]);
-            let call = BrokerCall {
-                call_id: format!("set-sensitive-{index}"),
-                run_id,
-                tool: "desktop.act".into(),
-                arguments: serde_json::json!({
-                    "snapshot_id": snapshot_id,
-                    "element_ref": element_ref,
-                    "action": "set-value",
-                    "value": "never-send-this"
-                }),
-                authorization_ref: None,
-            };
-            assert!(matches!(
-                broker.request_approval(&call),
-                Err(BrokerError::Desktop(message)) if message.contains("sensitive")
-            ));
-        }
-    }
-
-    #[test]
-    fn file_approvals_describe_the_user_visible_target() {
-        let broker = Broker::default();
+        let grant = broker.begin_task_grant("run-a", "request-hash", ["process.list".to_owned()]);
         let call = BrokerCall {
-            call_id: "write-readme".into(),
-            run_id: "run-write".into(),
-            tool: "files.write".into(),
-            arguments: serde_json::json!({
-                "path": "/tmp/vox/README.md",
-                "content": "novo conteúdo",
-                "overwrite": true
-            }),
-            authorization_ref: None,
-        };
-        let approval = broker.request_approval(&call).unwrap();
-        assert_eq!(
-            approval.summary.as_deref(),
-            Some("sobrescrever /tmp/vox/README.md")
-        );
-    }
-
-    #[test]
-    fn mismatched_approval_never_reaches_the_runtime() {
-        let broker = Broker::default();
-        let call = BrokerCall {
-            call_id: "c".into(),
-            run_id: "r".into(),
+            call_id: "call-a".into(),
+            run_id: "run-a".into(),
+            task_grant_id: grant.id,
             tool: "shell.exec".into(),
-            arguments: serde_json::json!({"program":"printf","argv":["ok"]}),
-            authorization_ref: Some("not-a-token".into()),
+            arguments: serde_json::json!({"program":"true"}),
         };
-        let result = broker.execute(&call).unwrap();
-        assert_eq!(result.error_code.as_deref(), Some("INVALID_APPROVAL"));
-    }
-
-    #[test]
-    fn approval_is_bound_to_its_original_run() {
-        let broker = Broker::default();
-        let original = BrokerCall {
-            call_id: "call-original".into(),
-            run_id: "run-original".into(),
-            tool: "shell.exec".into(),
-            arguments: serde_json::json!({"program":"printf","argv":["ok"]}),
-            authorization_ref: None,
-        };
-        let approval = broker.request_approval(&original).unwrap();
-        let other_run = BrokerCall {
-            call_id: "call-other".into(),
-            run_id: "run-other".into(),
-            tool: original.tool.clone(),
-            arguments: original.arguments.clone(),
-            authorization_ref: Some(approval.approval_id.clone()),
-        };
-
-        let rejected = broker.execute(&other_run).unwrap();
-        assert_eq!(rejected.error_code.as_deref(), Some("INVALID_APPROVAL"));
-
-        let authorized = BrokerCall {
-            authorization_ref: Some(approval.approval_id),
-            ..original
-        };
-        assert_eq!(broker.execute(&authorized).unwrap().status, "success");
-    }
-
-    #[test]
-    fn a05_existing_destination_never_overwrites_without_approval() {
-        let root = std::env::temp_dir().join(format!(
-            "vox-broker-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+        assert!(matches!(
+            broker.execute(&call),
+            Err(BrokerError::TaskGrantOutOfScope)
         ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("approved.txt");
-        let broker = Broker::new(RuntimeConfig {
-            allowed_roots: vec![root.clone()],
-            ..RuntimeConfig::default()
-        });
-        let call = BrokerCall {
-            call_id: "call-write".into(),
-            run_id: "run-write".into(),
-            tool: "files.write".into(),
-            arguments: serde_json::json!({
-                "path": path,
-                "content": "approved once",
-                "overwrite": false
-            }),
-            authorization_ref: None,
-        };
-
-        let pending = broker.execute(&call).unwrap();
-        assert_eq!(pending.error_code.as_deref(), Some("APPROVAL_REQUIRED"));
-        assert!(!path.exists());
-
-        let applied = broker.execute_with_approval(&call).unwrap();
-        assert_eq!(applied.status, "success");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "approved once");
-
-        let replay = broker.execute(&call).unwrap();
-        assert_eq!(replay.error_code.as_deref(), Some("APPROVAL_REQUIRED"));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "approved once");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a11_clipboard_write_requires_approval_and_uses_the_runtime_backend() {
-        let root = std::env::temp_dir().join(format!(
-            "vox-broker-clipboard-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let read_script = root.join("clipboard-read.sh");
-        let write_script = root.join("clipboard-write.sh");
-        let output_path = root.join("clipboard.txt");
-        fs::write(&read_script, "#!/bin/sh\nprintf 'from-clipboard'\n").unwrap();
-        fs::write(
-            &write_script,
-            format!("#!/bin/sh\ncat > '{}'\n", output_path.display()),
-        )
-        .unwrap();
-        for script in [&read_script, &write_script] {
-            let mut permissions = fs::metadata(script).unwrap().permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-            fs::set_permissions(script, permissions).unwrap();
-        }
-        let broker = Broker::new(RuntimeConfig {
-            allowed_roots: vec![root.clone()],
-            clipboard_read_command: Some(read_script),
-            clipboard_write_command: Some(write_script),
-            ..RuntimeConfig::default()
-        });
-        let read_call = BrokerCall {
-            call_id: "clipboard-read".into(),
-            run_id: "clipboard-run".into(),
-            tool: "clipboard.read".into(),
-            arguments: serde_json::json!({}),
-            authorization_ref: None,
-        };
-        let read = broker.execute(&read_call).unwrap();
-        assert_eq!(read.status, "success");
-        assert_eq!(read.data["text"], "from-clipboard");
-
-        let write_call = BrokerCall {
-            call_id: "clipboard-write".into(),
-            run_id: "clipboard-run".into(),
-            tool: "clipboard.write".into(),
-            arguments: serde_json::json!({"text":"approved clipboard"}),
-            authorization_ref: None,
-        };
-        let pending = broker.execute(&write_call).unwrap();
-        assert_eq!(pending.error_code.as_deref(), Some("APPROVAL_REQUIRED"));
-        assert!(!output_path.exists());
-
-        let applied = broker.execute_with_approval(&write_call).unwrap();
-        assert_eq!(applied.status, "success");
-        assert_eq!(
-            fs::read_to_string(&output_path).unwrap(),
-            "approved clipboard"
-        );
-        let _ = fs::remove_dir_all(root);
     }
 }

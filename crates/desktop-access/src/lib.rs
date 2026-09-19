@@ -148,13 +148,17 @@ impl NativeDesktop {
         let apps = App::list().map_err(|error| format!("xa11y app enumeration failed: {error}"))?;
         let mut snapshots = Vec::new();
         let mut inaccessible_apps = Vec::new();
+        let mut targeted_access_error = None;
         for app in apps {
             if app_pid.is_some_and(|pid| app.pid != Some(pid)) {
                 continue;
             }
             let app_id = native_app_id(&app.name, app.pid, app.data.handle);
             let windows = if matches!(app.data.role, Role::Window | Role::Dialog) {
-                Vec::new()
+                // Linux can expose an Electron process itself as the window
+                // root. Treating it as a metadata-only app loses its entire
+                // renderer tree, even when its children are available.
+                vec![app.as_element()]
             } else {
                 match app.children() {
                     Ok(children) => children
@@ -168,19 +172,27 @@ impl NativeDesktop {
                     }
                 }
             };
-            if windows.is_empty() && matches!(app.data.role, Role::Window | Role::Dialog) {
-                snapshots.push(self.snapshot_for_data(&app_id, &app.data));
-            } else {
-                for window in windows {
-                    match self.snapshot_for_element(&app_id, &window) {
-                        Ok(snapshot) => snapshots.push(snapshot),
-                        Err(_) => inaccessible_apps
-                            .push(bounded_display_text(&app.name, MAX_DISPLAY_TEXT_CHARS)),
+            for window in windows {
+                match self.snapshot_for_element(&app_id, &window) {
+                    Ok(snapshot) => snapshots.push(snapshot),
+                    Err(error) => {
+                        inaccessible_apps
+                            .push(bounded_display_text(&app.name, MAX_DISPLAY_TEXT_CHARS));
+                        // A targeted observation has exactly one user-selected
+                        // process. Preserve a platform diagnostic such as
+                        // Chromium's disabled renderer accessibility bridge
+                        // instead of collapsing it into a vague empty tree.
+                        if app_pid.is_some() && targeted_access_error.is_none() {
+                            targeted_access_error = Some(error);
+                        }
                     }
                 }
             }
         }
         if snapshots.is_empty() && !inaccessible_apps.is_empty() {
+            if let Some(error) = targeted_access_error {
+                return Err(error);
+            }
             let inaccessible = inaccessible_apps
                 .into_iter()
                 .take(3)
@@ -252,17 +264,6 @@ impl NativeDesktop {
         let mut truncated = false;
         append_native_node(element, None, 0, self.limits, &mut nodes, &mut truncated)?;
         Ok(self.finish_snapshot(app_id, window_id, nodes, truncated))
-    }
-
-    fn snapshot_for_data(&self, app_id: &str, data: &xa11y::ElementData) -> SemanticSnapshot {
-        let mut truncated = false;
-        let node = semantic_node(data, None, &mut truncated);
-        self.finish_snapshot(
-            app_id,
-            native_window_ref(app_id, data),
-            vec![node],
-            truncated,
-        )
     }
 
     fn finish_snapshot(
@@ -404,15 +405,16 @@ fn resolve_native_element(
         if current_app_id != app_id {
             continue;
         }
-        if matches!(app.data.role, Role::Window | Role::Dialog) {
-            continue;
-        }
-        let roots = match app.children() {
-            Ok(roots) => roots,
-            // An inaccessible unrelated window should not turn a stale
-            // reference into an arbitrary target. Treat it as unavailable and
-            // keep looking only within the matching app identity.
-            Err(_) => continue,
+        let roots = if matches!(app.data.role, Role::Window | Role::Dialog) {
+            vec![app.as_element()]
+        } else {
+            match app.children() {
+                Ok(roots) => roots,
+                // An inaccessible unrelated window should not turn a stale
+                // reference into an arbitrary target. Treat it as unavailable
+                // and keep looking only within the matching app identity.
+                Err(_) => continue,
+            }
         };
         for root in roots {
             if native_window_ref(&current_app_id, root.data()) != window_id {
@@ -601,6 +603,11 @@ fn append_native_node(
     }
     let children = match element.children() {
         Ok(children) => children,
+        Err(error @ xa11y::Error::AccessibilityNotEnabled { .. }) => {
+            // This is an actionable Chromium/Electron configuration error,
+            // not a partial snapshot. Propagate it to the targeted caller.
+            return Err(error.to_string());
+        }
         Err(_) => {
             *truncated = true;
             return Ok(());

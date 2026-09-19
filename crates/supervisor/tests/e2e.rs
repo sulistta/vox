@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use vox_broker::{Broker, BrokerCall, BrokerResult};
+use vox_broker::{Broker, BrokerCall};
 use vox_supervisor::{poll_with_timeout, AgentSupervisor};
 use vox_tool_runtime::RuntimeConfig;
 
@@ -35,7 +35,7 @@ fn start_supervisor() -> AgentSupervisor {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("node")),
         entry,
-        &[("VOX_PROVIDER".into(), "fake-tools".into())],
+        &[],
     )
     .expect("spawn private core");
     supervisor.initialize().expect("initialize core");
@@ -62,8 +62,21 @@ fn wait_for_turn(
             .expect("valid session event")["type"],
         "session.opened"
     );
+    let grant = broker.begin_task_grant(
+        run_id,
+        "e2e-request",
+        ["clipboard.read".to_owned(), "clipboard.write".to_owned()],
+    );
     supervisor
-        .start_turn("e2e-turn", session_id, run_id, content)
+        .start_turn_with_context(
+            "e2e-turn",
+            session_id,
+            run_id,
+            &grant.id,
+            content,
+            "text",
+            &[],
+        )
         .expect("start turn");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_tool = false;
@@ -77,11 +90,11 @@ fn wait_for_turn(
                     let call = BrokerCall {
                         call_id: event["call_id"].as_str().unwrap().into(),
                         run_id: event["run_id"].as_str().unwrap().into(),
+                        task_grant_id: event["task_grant_id"].as_str().unwrap().into(),
                         tool: event["tool"].as_str().unwrap().into(),
                         arguments: event["arguments"].clone(),
-                        authorization_ref: None,
                     };
-                    let result = authorize_if_needed(broker, &call);
+                    let result = broker.execute(&call).expect("execute task-granted call");
                     supervisor
                         .send_tool_result_with_verification(
                             &call.run_id,
@@ -109,21 +122,9 @@ fn wait_for_turn(
     (saw_tool, saw_completion)
 }
 
-fn authorize_if_needed(broker: &Broker, call: &BrokerCall) -> BrokerResult {
-    let pending = broker.execute(call).expect("broker decision");
-    if pending.error_code.as_deref() != Some("APPROVAL_REQUIRED") {
-        return pending;
-    }
-    let approval = broker.request_approval(call).expect("issue approval");
-    let mut authorized = call.clone();
-    authorized.authorization_ref = Some(approval.approval_id);
-    broker
-        .execute(&authorized)
-        .expect("execute approved clipboard call")
-}
-
 #[cfg(unix)]
 #[test]
+#[ignore = "requires configured Jev and text services"]
 fn e2e_core_supervisor_broker_and_clipboard_read_cross_the_ipc_boundary() {
     let root = fixture_root();
     fs::create_dir_all(&root).unwrap();
@@ -151,7 +152,8 @@ fn e2e_core_supervisor_broker_and_clipboard_read_cross_the_ipc_boundary() {
 
 #[cfg(unix)]
 #[test]
-fn e2e_core_supervisor_broker_and_approval_cross_the_ipc_boundary() {
+#[ignore = "requires configured Jev and text services"]
+fn e2e_core_supervisor_broker_and_task_grant_cross_the_ipc_boundary() {
     let root = fixture_root();
     fs::create_dir_all(&root).unwrap();
     let write_script = root.join("write.sh");

@@ -21,7 +21,7 @@ definição, mas ainda deve ser revisado antes do envio.
 
 ## Vulnerabilidades
 
-Falhas de autorização, exfiltração, bypass do broker, replay de approval,
+Falhas de autorização, exfiltração, bypass do broker, replay de grant,
 execução fora da raiz ou falsa confirmação de efeito são críticas. Não publicar
 detalhes exploráveis antes de correção e revisão. O responsável deve:
 

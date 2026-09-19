@@ -30,7 +30,7 @@ pub enum ToolError {
     ClipboardTooLarge,
     #[error("accessibility backend unavailable: {0}")]
     AccessibilityUnavailable(String),
-    #[error("destination already exists; explicit overwrite approval is required")]
+    #[error("destination already exists; set overwrite=true to replace it")]
     DestinationExists,
     #[error("directory is not available: {0}")]
     DirectoryUnavailable(String),

@@ -18,7 +18,10 @@ function expand(value: any): any {
 }
 for (const fixture of cases) {
   test(`shared boundary: ${fixture.name}`, () => {
-    const message = expand(fixture.message);
+    const expanded = expand(fixture.message) as Record<string, unknown> | undefined;
+    const message = expanded && ["turn.start", "tool.started", "tool.execute.requested"].includes(String(expanded.type))
+      ? { ...expanded, task_grant_id: "fixture-grant" }
+      : expanded;
     const line = fixture.line ?? JSON.stringify(message);
     if (fixture.expect === "valid") assert.doesNotThrow(() => parseMessage(line));
     else assert.throws(() => parseMessage(line), ProtocolError);
@@ -44,7 +47,7 @@ const contract = (name: string, overrides: Record<string, unknown> = {}): string
       "utf8",
     ),
   ) as Record<string, unknown>;
-  return JSON.stringify({ ...value, ...overrides });
+  return JSON.stringify({ ...value, task_grant_id: "contract-grant", ...overrides });
 };
 
 test("accepts a valid turn and preserves structured fields", () => {
@@ -53,6 +56,7 @@ test("accepts a valid turn and preserves structured fields", () => {
     request_id: "req-1",
     session_id: "session-1",
     run_id: "run-1",
+    task_grant_id: "grant-1",
     content: "mostrar janelas",
   });
   assert.equal(encoded.endsWith("\n"), true);
@@ -61,6 +65,7 @@ test("accepts a valid turn and preserves structured fields", () => {
     request_id: "req-1",
     session_id: "session-1",
     run_id: "run-1",
+    task_grant_id: "grant-1",
     content: "mostrar janelas",
   });
 });

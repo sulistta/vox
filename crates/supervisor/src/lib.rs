@@ -222,18 +222,20 @@ impl AgentSupervisor {
         run_id: &str,
         content: &str,
     ) -> Result<(), SupervisorError> {
-        self.start_turn_with_context(request_id, session_id, run_id, content, "text", &[])
+        self.start_turn_with_context(request_id, session_id, run_id, run_id, content, "text", &[])
     }
 
     /// Start a turn with a bounded, already-redacted conversation context.
     /// The supervisor only transports it; construction and authorization stay
     /// with the desktop/session layers and the core validates the final IPC
     /// shape before using it.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_turn_with_context(
         &self,
         request_id: &str,
         session_id: &str,
         run_id: &str,
+        task_grant_id: &str,
         content: &str,
         source: &str,
         context: &[Value],
@@ -243,6 +245,7 @@ impl AgentSupervisor {
             "request_id":request_id,
             "session_id":session_id,
             "run_id":run_id,
+            "task_grant_id":task_grant_id,
             "content":content,
             "source":source,
             "context":context,
@@ -329,8 +332,12 @@ impl AgentSupervisor {
             "data":data,
             "verification":verification.cloned().unwrap_or_else(|| json!({"observed":false}))
         });
-        if let Some(error_code) = error_code { message["error_code"] = json!(error_code); }
-        if let Some(error) = error { message["error"] = json!(error); }
+        if let Some(error_code) = error_code {
+            message["error_code"] = json!(error_code);
+        }
+        if let Some(error) = error {
+            message["error"] = json!(error);
+        }
         self.send(&message)
     }
 

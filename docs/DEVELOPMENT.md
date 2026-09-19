@@ -49,17 +49,13 @@ VOX_AGENT_ENTRY="$PWD/packages/agent-core/dist/main.js" \
   ./target/debug/vox-desktop
 ```
 
-`VOX_PROVIDER=fake` é o padrão seguro e textual: ele responde à conversa, mas não propõe nem executa ferramentas. Para testar a fixture determinística de ferramentas, use somente em testes `VOX_PROVIDER=fake-tools`. Um endpoint OpenAI-compatible exige `VOX_PROVIDER=openai-compatible`, `VOX_PROVIDER_BASE_URL` e `VOX_PROVIDER_MODEL`; `VOX_PROVIDER_API_KEY` fica somente no processo e nunca é impresso. Pela janela, salvar endpoint e modelo em Preferências ativa esse provider no próximo core privado ocioso.
+O Vox exige dois serviços para iniciar tarefas. O Jev usa `VOX_AGENT_API_KEY`, `VOX_AGENT_MODEL` e, quando necessário, `VOX_AGENT_BASE_URL`. O serviço de texto OpenAI-compatible usa `VOX_TEXT_BASE_URL`, `VOX_TEXT_MODEL` e `VOX_TEXT_API_KEY`. As chaves ficam somente no processo privado e nunca são impressas. Pela janela, salvar configuração em Preferências reinicia o core ocioso.
 
-Para verificar uma conta OpenAI-compatible configurada no ambiente, após
-`pnpm build` rode `pnpm smoke:provider`; para testar cancelamento, rode
-`VOX_PROVIDER_SMOKE_MODE=cancel pnpm smoke:provider`. O script exige que
-`VOX_PROVIDER_BASE_URL`, `VOX_PROVIDER_MODEL` e `VOX_PROVIDER_API_KEY` já
-estejam disponíveis no processo. Ele bloqueia todas as tools, não espelha
-payload/resposta/stderr e imprime somente um resumo redigido. Não salve a chave
-em `.env` versionado, SQLite ou na linha de comando.
+Os botões **Testar conexão de texto** e **Testar conexão com Jev** fazem
+probes mínimos pelo core privado e exibem apenas diagnóstico redigido. Não
+salve chaves em `.env` versionado, SQLite ou na linha de comando.
 
-Para usar o keyring no Linux, configure `VOX_PROVIDER_ACCOUNT` ou informe a
+Para usar o keyring no Linux, configure `VOX_TEXT_ACCOUNT` ou informe a
 conta em Preferências e grave a chave pelo botão explícito. Endpoint e modelo
 também podem ser editados nas Preferências; quando não há run ativo, a mudança
 reinicia somente o core privado e mantém a janela/sessão. O Vox usa
@@ -70,6 +66,15 @@ reabra o Vox e salve a chave novamente. Não coloque a chave no SQLite ou em
 logs. Em macOS e Windows, o build usa os backends nativos de
 Keychain/Credential Manager; a aceitação desses backends depende da execução na
 matriz CI e nas máquinas de referência.
+
+Em **Preferências → Agente Jev**, mantenha o modelo `jev-latest` ou informe outro identificador, e grave a chave em uma entrada
+separada do keyring (`vox-agent`). O botão **Testar conexão com Jev** faz uma
+chamada de decisão mínima pelo core e mostra o modelo resolvido ou um erro
+redigido. A janela nunca configura endpoint para Jev: o adapter usa a API
+direta TypeSafe. Jev só escolhe entre opções já declaradas; a conversa, textos
+para digitar, caminhos, comandos e conteúdo de arquivos continuam no provider
+generativo. Com ambos configurados, o rótulo passa a mostrar `Jev decide ·
+[modelo]`.
 
 `VOX_XA11Y_BIN` pode apontar para um binário xa11y apenas como fallback operacional. A ferramenta de janelas tenta primeiro o adapter Rust nativo; se a ponte de acessibilidade não estiver disponível, o resultado é uma falha factual e recuperável, não uma fixture apresentada como observação real.
 
@@ -90,9 +95,9 @@ depois que a tarefa em andamento termina, para que uma operação não mude de
 escopo no meio da execução.
 
 O histórico usa SQLite persistente no diretório de dados da plataforma. Para
-um smoke isolado, defina `VOX_DATA_DIR` para um diretório temporário; as
-migrações não reconstroem approvals antigos e a exportação redige valores com
-aparência de segredo. O schema v4 guarda o rascunho separadamente por sessão,
+um teste isolado, defina `VOX_DATA_DIR` para um diretório temporário; a
+migração registra grants por tarefa e a exportação redige valores com aparência
+de segredo. O schema v6 guarda o rascunho separadamente por sessão,
 redige-o antes da escrita, restaura a última sessão válida no próximo início e
 o exclui da exportação. O backup SQLite pode conter apenas a versão já
 redigida do rascunho.
@@ -105,3 +110,10 @@ histórico vem do SQLite, e não da quantidade de bolhas visíveis.
 ## Limites atuais
 
 O caminho executável validado nesta máquina é Linux/Wayland. Windows, macOS, GNOME/KDE/X11 e instalação limpa têm jobs e documentação de validação, mas não devem ser declarados aprovados até que a execução real do ambiente seja registrada nos artefatos de T005–T008 e T047–T056.
+
+Alguns aplicativos Electron/Chromium no Linux iniciam sem publicar controles
+de interface no AT-SPI. Quando isso ocorrer, o Vox informa que a bridge de
+acessibilidade do renderer está desligada e não repete a tarefa. Feche o
+aplicativo e inicie-o com `--force-renderer-accessibility`; depois, execute a
+solicitação novamente. O Vox nunca afirma que uma ação externa ocorreu antes
+de obter a observação correspondente.

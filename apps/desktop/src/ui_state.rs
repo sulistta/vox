@@ -3,7 +3,6 @@ pub enum WindowMode {
     Invocation,
     Conversation,
     Compact,
-    Approval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +188,8 @@ impl PresentationState {
 
     /// Records a transparency event only for the active run. A malformed or
     /// stale core event cannot overwrite the user-visible activity of a newer
-    /// task. The protocol bounds rounds to 32; this cap is kept locally too.
+    /// task. Hybrid turns can record both Jev and text-model activity, so the
+    /// presentation retains more entries than the logical turn cap.
     pub fn record_model_activity_for(&mut self, run_id: &str, round: ModelActivityRound) {
         if self.active_run.as_deref() != Some(run_id) {
             return;
@@ -197,13 +197,13 @@ impl PresentationState {
         if let Some(existing) = self
             .model_activity
             .iter_mut()
-            .find(|existing| existing.round == round.round)
+            .find(|existing| existing.round == round.round && existing.provider == round.provider)
         {
             *existing = round;
         } else {
             self.model_activity.push(round);
             self.model_activity.sort_by_key(|entry| entry.round);
-            if self.model_activity.len() > 32 {
+            if self.model_activity.len() > 64 {
                 self.model_activity.remove(0);
             }
         }
@@ -342,7 +342,7 @@ mod tests {
             "run-old",
             ModelActivityRound {
                 round: 1,
-                provider: "fake".into(),
+                provider: "typesafe-jev".into(),
                 model_ref: None,
                 messages: vec![],
             },
@@ -352,8 +352,8 @@ mod tests {
             "run-current",
             ModelActivityRound {
                 round: 1,
-                provider: "fake".into(),
-                model_ref: Some("fake-text".into()),
+                provider: "openai-compatible-text".into(),
+                model_ref: Some("text-model".into()),
                 messages: vec![ModelActivityMessage {
                     role: "user".into(),
                     content: "pedido redigido".into(),
@@ -363,5 +363,28 @@ mod tests {
         state.complete_for("run-current", "feito");
         assert_eq!(state.model_activity.len(), 1);
         assert!(!state.show_activity);
+    }
+
+    #[test]
+    fn activity_keeps_jev_and_text_entries_from_the_same_logical_round() {
+        let mut state = PresentationState::default();
+        state.submit("oi", "run-current");
+        for provider in ["typesafe-jev/roteamento", "openai-compatible"] {
+            state.record_model_activity_for(
+                "run-current",
+                ModelActivityRound {
+                    round: 1,
+                    provider: provider.into(),
+                    model_ref: None,
+                    messages: vec![ModelActivityMessage {
+                        role: "user".into(),
+                        content: "atividade redigida".into(),
+                    }],
+                },
+            );
+        }
+        assert_eq!(state.model_activity.len(), 2);
+        assert_eq!(state.model_activity[0].provider, "typesafe-jev/roteamento");
+        assert_eq!(state.model_activity[1].provider, "openai-compatible");
     }
 }

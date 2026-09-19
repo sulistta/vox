@@ -32,7 +32,7 @@ computador do usuário. O checklist é:
 4. executar instalação limpa, atualização, migração, rollback compatível e
    desinstalação com escolha explícita sobre os dados;
 5. testar permissões, keyring, fontes, atalhos, geometria, residência, Parar,
-   aprovação e recuperação fora da árvore de desenvolvimento;
+   grants por tarefa e recuperação fora da árvore de desenvolvimento;
 6. publicar changelog, limitações e canal de suporte junto com os hashes.
 
 O manifesto do bundle dev é uma evidência local de integridade do artefato, não

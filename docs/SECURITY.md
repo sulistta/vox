@@ -11,8 +11,8 @@ português/inglês, como senha, segredo, credencial, token, PIN e chave; o valor
 é redigido antes de cruzar a fronteira do modelo.
 
 - leituras são limitadas por raiz, tamanho e paginação;
-- escrita/movimentação, shell, lançamento e término de processo exigem aprovação vinculada ao hash exato dos argumentos;
-- aprovações expiram e são consumidas uma vez;
+- cada tarefa enviada cria um `TaskGrant` opaco, ligado ao `run_id`, com expiração e limites de ferramentas, snapshots e raízes;
+- ações fora do grant, campos sensíveis, snapshots vencidos e caminhos externos permanecem bloqueados;
 - resultados `unknown` não são repetidos automaticamente;
 - stdout/stderr e eventos passam por limites para não travar IPC;
 - valores com aparência de credencial são redigidos antes de persistir/exportar;
@@ -28,7 +28,7 @@ Linux, Security.framework/Keychain no macOS e Windows Credential Manager no
 Windows. O Linux recebe o segredo por stdin quando grava; os outros dois
 backends usam APIs nativas e não colocam o segredo em argumentos de processo.
 Uma cópia só é injetada no ambiente do processo privado do core quando
-`VOX_PROVIDER_ACCOUNT` é definido. O SQLite, exportação e logs não recebem a
+`VOX_TEXT_ACCOUNT` ou `VOX_AGENT_ACCOUNT` é definido. O SQLite, exportação e logs não recebem a
 chave. Não existe fallback silencioso para arquivo; a aceitação operacional de
 macOS/Windows ainda precisa ocorrer nas máquinas de referência.
 
@@ -37,9 +37,8 @@ gravação explícita; o campo é limpo após sucesso e a aplicação ocorre no
 próximo processo privado do core (imediatamente quando ocioso, ou após o run
 terminar), sem hot-reload implícito durante uma execução.
 
-“Ver atividade” mostra somente a versão redigida do pedido que saiu para o
-provider. Antes de renderizar detalhes de uma aprovação, a janela reaplica
-redação recursiva a chaves de credencial em inglês e português, incluindo
+“Ver atividade” mostra somente a versão redigida do estado, das opções e das
+respostas enviadas aos serviços. A janela reaplica redação recursiva a chaves de credencial em inglês e português, incluindo
 `password`, `secret`, `token`, `senha`, `segredo`, `credencial` e
 `chave`. Tokens compatíveis com OpenAI/OpenRouter colados sem rótulo (`sk-…`)
 também são redigidos antes de persistência, atividade e envio ao modelo; o

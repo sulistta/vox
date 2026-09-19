@@ -155,13 +155,21 @@ impl SecretStore {
         }
         let output = self.run("delete", account, None)?;
         if output.status.success() || output.status.code() == Some(1) {
-            Ok(())
-        } else {
-            Err(SecretError::Command {
-                operation: "delete",
-                status: output.status.code().unwrap_or(-1),
-            })
+            return Ok(());
         }
+
+        // A keyring helper may report a non-zero exit status after it has
+        // applied the deletion (for example, while cleaning a stale item).
+        // Deletion is idempotent, so verify its post-condition before
+        // surfacing the command failure. A readable value is never ignored.
+        if matches!(self.get(account), Ok(None)) {
+            return Ok(());
+        }
+
+        Err(SecretError::Command {
+            operation: "delete",
+            status: output.status.code().unwrap_or(-1),
+        })
     }
 
     fn command_spec(
@@ -759,6 +767,50 @@ mod tests {
             store.set("provider", &"x".repeat(MAX_SECRET_BYTES + 1)),
             Err(SecretError::TooLarge)
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_accepts_a_nonzero_exit_only_after_the_secret_is_gone() {
+        let root = std::env::temp_dir().join(format!(
+            "vox-secrets-delete-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let state = root.join("secret.state");
+        let fixture = root.join("keyring-fixture.sh");
+        fs::write(
+            &fixture,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\nget) test -f '{0}' && cat '{0}' || exit 1 ;;\nset) cat > '{0}' ;;\ndelete) test \"$3\" = kept && exit 2; rm -f '{0}'; exit 2 ;;\nesac\n",
+                state.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fixture).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&fixture, permissions).unwrap();
+
+        let store = SecretStore::with_command("vox-test", fixture);
+        store.set("provider", "secret-value").unwrap();
+        store.delete("provider").unwrap();
+        assert_eq!(store.get("provider").unwrap(), None);
+
+        store.set("kept", "secret-value").unwrap();
+        assert!(matches!(
+            store.delete("kept"),
+            Err(SecretError::Command {
+                operation: "delete",
+                status: 2,
+            })
+        ));
+        assert_eq!(store.get("kept").unwrap().as_deref(), Some("secret-value"));
+
         let _ = fs::remove_dir_all(root);
     }
 

@@ -42,9 +42,6 @@ export const ipcSchema = {
       "$ref": "#/$defs/tool.execute.requested"
     },
     {
-      "$ref": "#/$defs/approval.required"
-    },
-    {
       "$ref": "#/$defs/state.changed"
     },
     {
@@ -212,6 +209,12 @@ export const ipcSchema = {
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "content": {
           "type": "string",
           "minLength": 0,
@@ -275,6 +278,7 @@ export const ipcSchema = {
         "request_id",
         "session_id",
         "run_id",
+        "task_grant_id",
         "content"
       ],
       "additionalProperties": true
@@ -533,6 +537,12 @@ export const ipcSchema = {
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "call_id": {
           "type": "string",
           "minLength": 1,
@@ -563,6 +573,7 @@ export const ipcSchema = {
         "type",
         "session_id",
         "run_id",
+        "task_grant_id",
         "call_id",
         "tool",
         "arguments",
@@ -588,6 +599,12 @@ export const ipcSchema = {
           "maxLength": 128,
           "x-maxUtf8Bytes": 128
         },
+        "task_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
         "call_id": {
           "type": "string",
           "minLength": 1,
@@ -618,79 +635,11 @@ export const ipcSchema = {
         "type",
         "session_id",
         "run_id",
+        "task_grant_id",
         "call_id",
         "tool",
         "arguments",
         "effect"
-      ],
-      "additionalProperties": true
-    },
-    "approval.required": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "const": "approval.required"
-        },
-        "session_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "run_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "call_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "tool": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "arguments": {
-          "type": "object"
-        },
-        "effect": {
-          "type": "string",
-          "enum": [
-            "none",
-            "read",
-            "write",
-            "external",
-            "arbitrary"
-          ]
-        },
-        "approval_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        },
-        "expires_at": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "x-maxUtf8Bytes": 128
-        }
-      },
-      "required": [
-        "type",
-        "session_id",
-        "run_id",
-        "call_id",
-        "tool",
-        "arguments",
-        "effect",
-        "approval_id",
-        "expires_at"
       ],
       "additionalProperties": true
     },
@@ -721,7 +670,6 @@ export const ipcSchema = {
             "thinking",
             "executing",
             "waiting_user",
-            "awaiting_approval",
             "cancelling",
             "completed",
             "failed",

@@ -2,6 +2,9 @@ use serde_json::json;
 use vox_desktop_access::{list_native_windows, NativeDesktop};
 
 fn main() {
+    let requested_app_pid = std::env::var("VOX_A11Y_APP_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
     match list_native_windows() {
         Ok(windows) => println!(
             "windows={}",
@@ -21,18 +24,21 @@ fn main() {
         Err(error) => println!("windows={}", json!({ "error": error })),
     }
 
-    match NativeDesktop::default().snapshots() {
+    match NativeDesktop::default().snapshots_for_app_pid(requested_app_pid) {
         Ok(snapshots) => {
             let first_window_ids = snapshots
                 .iter()
                 .map(|snapshot| (snapshot.app_id.clone(), snapshot.window_id.clone()))
                 .collect::<std::collections::BTreeSet<_>>();
-            let repeated_window_ids = NativeDesktop::default().snapshots().ok().map(|snapshots| {
-                snapshots
-                    .into_iter()
-                    .map(|snapshot| (snapshot.app_id, snapshot.window_id))
-                    .collect::<std::collections::BTreeSet<_>>()
-            });
+            let repeated_window_ids = NativeDesktop::default()
+                .snapshots_for_app_pid(requested_app_pid)
+                .ok()
+                .map(|snapshots| {
+                    snapshots
+                        .into_iter()
+                        .map(|snapshot| (snapshot.app_id, snapshot.window_id))
+                        .collect::<std::collections::BTreeSet<_>>()
+                });
             let repeated_matches = repeated_window_ids
                 .as_ref()
                 .map(|ids| first_window_ids.intersection(ids).count());
@@ -53,6 +59,9 @@ fn main() {
                 })
             );
         }
-        Err(error) => println!("snapshots={}", json!({ "error": error })),
+        Err(error) => println!(
+            "snapshots={}",
+            json!({ "app_pid": requested_app_pid, "error": error })
+        ),
     }
 }

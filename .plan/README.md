@@ -1,10 +1,10 @@
 # Plano de desenvolvimento — Vox
 
-Data: 16/09/2026. Nome de trabalho: Vox, inferido do diretório; marca final pendente.
+Data-base: 16/09/2026. Revisão de arquitetura: 19/09/2026.
 
 ## Estado atual
 
-A T001 foi concluída com o alinhamento de produto e seu registro em [T001-alinhamento-produto.md](T001-alinhamento-produto.md). A primeira fatia executável agora existe: workspace Rust/TypeScript, core privado, IPC, broker/política, runtime de arquivos, SQLite, adapter xa11y e janela egui. A evidência e os limites estão nos [registros de 16/09](EXECUCAO-2026-09-16.md) e [17/09/2026](EXECUCAO-2026-09-17.md), além da [auditoria de prontidão](PRONTIDAO-2026-09-17.md). O contexto original do usuário continua sendo a autoridade de produto; código local não substitui provas multiplataforma ou de instalação.
+A arquitetura ativa está em [Execução — Jev como agente principal](EXECUCAO-2026-09-19-jev-principal.md): Jev conduz o run, o serviço de texto produz somente dados e conteúdo livre, e cada tarefa cria um `TaskGrant` automático limitado ao próprio run. Os documentos anteriores preservam o raciocínio e a evidência histórica, mas descrições de provider híbrido e aprovação por chamada estão superadas; não devem orientar novas alterações. O contexto original do usuário continua sendo a autoridade de produto; código local não substitui provas multiplataforma ou de instalação.
 
 ## Guia de leitura
 
@@ -28,15 +28,15 @@ O plano contém 82 tarefas principais; T001 e as tarefas marcadas como concluíd
 
 ## Como reproduzir e continuar
 
-Para reproduzir a fatia já executada, use `pnpm typecheck`, `pnpm test`,
+Para reproduzir a arquitetura ativa, use `pnpm typecheck`, `pnpm test`,
 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
 --all-features -- -D warnings`, `cargo test --workspace` e `cargo build -p
-vox-desktop`. O smoke, as limitações e as tarefas externas estão nos [registros
-de execução](EXECUCAO-2026-09-16.md) e [17/09](EXECUCAO-2026-09-17.md).
+vox-desktop`, `pnpm package:dev` e `pnpm bundle:validate dist/vox-dev`. As
+limitações e tarefas externas atuais estão no [registro de 19/09](EXECUCAO-2026-09-19-jev-principal.md).
 
-O próximo trabalho não deve recomeçar T001: deve executar os itens marcados
-como parciais/externos no registro, começando pelo gate multiplataforma, pela
-fixture acessível nativa, pelo pacote instalável e pelas jornadas reais.
+O próximo trabalho deve executar os itens externos do registro atual: credencial
+TypeSafe real, jornada controlada de interface e testes em Discord somente com
+árvore de acessibilidade disponível, além do gate multiplataforma.
 
 Cada tarefa começa pendente (`[ ]`). Ao iniciar, registrar responsável e data; ao bloquear, registrar causa e próxima ação; ao concluir, usar `[x]` e anexar evidências de aceite. Dependências significam tarefas concluídas, salvo trabalho experimental claramente isolado. Não marcar sucesso apenas por compilar.
 

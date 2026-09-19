@@ -1,20 +1,5 @@
 [
   {
-    "name": "invalid-approval-required-effect",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "session",
-      "run_id": "run",
-      "call_id": "call",
-      "tool": "desktop.list_windows",
-      "arguments": {},
-      "effect": "none_side_effect",
-      "approval_id": "approval",
-      "expires_at": "soon"
-    }
-  },
-  {
     "name": "invalid-error-null-retryable",
     "expect": "invalid",
     "message": {
@@ -1372,21 +1357,6 @@
           }
         }
       ]
-    }
-  },
-  {
-    "name": "valid-approval-required",
-    "expect": "valid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "session",
-      "run_id": "run",
-      "call_id": "call",
-      "tool": "desktop.list_windows",
-      "arguments": {},
-      "effect": "write",
-      "approval_id": "approval",
-      "expires_at": "soon"
     }
   },
   {
@@ -3270,147 +3240,6 @@
     }
   },
   {
-    "name": "shape-approval.required",
-    "expect": "valid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-type",
-    "expect": "invalid",
-    "message": {
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-session_id",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-run_id",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-call_id",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-tool",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-arguments",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "effect": "none",
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-effect",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "approval_id": "x",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-approval_id",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "expires_at": "x"
-    }
-  },
-  {
-    "name": "missing-approval.required-expires_at",
-    "expect": "invalid",
-    "message": {
-      "type": "approval.required",
-      "session_id": "x",
-      "run_id": "x",
-      "call_id": "x",
-      "tool": "x",
-      "arguments": {},
-      "effect": "none",
-      "approval_id": "x"
-    }
-  },
-  {
     "name": "shape-state.changed",
     "expect": "valid",
     "message": {
@@ -3893,20 +3722,6 @@
       "type": "error",
       "error_code": "x",
       "error": "x"
-    }
-  },
-  {
-    "name": "frame-boundary-0",
-    "expect": "valid",
-    "message": {
-      "type": "turn.start",
-      "request_id": "r",
-      "session_id": "s",
-      "run_id": "u",
-      "content": {
-        "$repeat": "x",
-        "count": 1048495
-      }
     }
   },
   {
