@@ -1,3 +1,5 @@
+import { ipcSchema } from "./ipc-schema.js";
+
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_MESSAGE_BYTES = 1024 * 1024;
 
@@ -249,39 +251,58 @@ export type IpcEvent =
 
 export type IpcMessage = IpcRequest | IpcEvent;
 
-const allowedTypes = new Set([
-  "initialize",
-  "initialized",
-  "session.open",
-  "session.opened",
-  "turn.start",
-  "turn.cancel",
-  "tool.result",
-  "tool.started",
-  "tool.execute.requested",
-  "tool.completed",
-  "approval.required",
-  "state.changed",
-  "message.delta",
-  "model.requested",
-  "run.completed",
-  "run.failed",
-  "run.cancelled",
-  "heartbeat",
-  "shutdown",
-  "error",
-]);
-
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function requiredString(object: Record<string, unknown>, key: string): string {
-  const value = object[key];
-  if (typeof value !== "string" || value.length === 0 || value.length > 128) {
-    throw new ProtocolError("INVALID_FIELD", `${key} must be a non-empty string up to 128 characters`);
+type Schema = {
+  type?: string | string[]; const?: unknown; enum?: unknown[]; minLength?: number; maxLength?: number;
+  "x-maxUtf8Bytes"?: number; minimum?: number; maximum?: number;
+  required?: string[]; properties?: Record<string, Schema>; items?: Schema; minItems?: number; maxItems?: number;
+};
+function validateSchema(value: unknown, schema: Schema, field = "message"): void {
+  const invalid = (): never => { throw new ProtocolError("INVALID_FIELD", `${field} is invalid`); };
+  if ("const" in schema && value !== schema.const) invalid();
+  if (schema.enum && !schema.enum.includes(value)) invalid();
+  const kind = Array.isArray(schema.type) ? schema.type.find((type) => type !== "null") : schema.type;
+  if (value === null && Array.isArray(schema.type) && schema.type.includes("null")) return;
+  switch (kind) {
+    case "string":
+      if (typeof value !== "string" || [...value].length < (schema.minLength ?? 0)
+          || Buffer.byteLength(value, "utf8") > (schema["x-maxUtf8Bytes"] ?? Infinity)) invalid();
+      break;
+    case "object": {
+      if (!isObject(value)) return invalid();
+      for (const key of schema.required ?? []) if (!(key in value)) invalid();
+      for (const [key, rule] of Object.entries(schema.properties ?? {})) {
+        if (Object.hasOwn(value, key)) validateSchema(value[key], rule, key);
+      }
+      break;
+    }
+    case "array":
+      if (!Array.isArray(value)) return invalid();
+      if (value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity)) invalid();
+      if (schema.items) for (const item of value) validateSchema(item, schema.items, field);
+      break;
+    case "boolean": if (typeof value !== "boolean") invalid(); break;
+    case "number": case "integer":
+      if (typeof value !== "number" || !Number.isFinite(value) || (schema.type === "integer" && !Number.isInteger(value))
+          || value < (schema.minimum ?? -Infinity) || value > (schema.maximum ?? Infinity)) invalid();
+      break;
+    case undefined: break;
+    default: throw new Error("unsupported IPC schema type");
   }
-  return value;
+}
+
+// JSON.parse accepts lone UTF-16 surrogates and overflowing numbers; serde_json does not.
+function validateJson(value: unknown, depth = 0): void {
+  if (depth >= 128 && typeof value === "object" && value !== null) throw new ProtocolError("INVALID_JSON", "JSON nesting limit exceeded");
+  if (typeof value === "number" && !Number.isFinite(value)) throw new ProtocolError("INVALID_JSON", "non-finite JSON number");
+  if (typeof value === "string" && /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) {
+    throw new ProtocolError("INVALID_JSON", "unpaired Unicode surrogate");
+  }
+  if (Array.isArray(value)) for (const item of value) validateJson(item, depth + 1);
+  else if (isObject(value)) for (const [key, item] of Object.entries(value)) { validateJson(key); validateJson(item, depth + 1); }
 }
 
 export class ProtocolError extends Error {
@@ -307,57 +328,14 @@ export function parseMessage(line: string): IpcMessage {
     throw new ProtocolError("INVALID_JSON", "message is not valid JSON");
   }
   if (!isObject(value)) throw new ProtocolError("INVALID_MESSAGE", "message must be a JSON object");
+  validateJson(value);
   const kind = value.type;
-  if (typeof kind !== "string" || !allowedTypes.has(kind)) throw new ProtocolError("UNKNOWN_TYPE", "unknown IPC message type");
-  if (kind === "turn.start") {
-    requiredString(value, "request_id");
-    requiredString(value, "session_id");
-    requiredString(value, "run_id");
-    if (typeof value.content !== "string" || value.content.length > 1_048_576) throw new ProtocolError("INVALID_FIELD", "content is invalid");
-    if (value.source !== undefined && value.source !== "text" && value.source !== "voice") throw new ProtocolError("INVALID_FIELD", "source is invalid");
-    if (value.model_ref !== undefined) requiredString(value, "model_ref");
-    if (value.context !== undefined) {
-      if (!Array.isArray(value.context) || value.context.length > 100) throw new ProtocolError("INVALID_FIELD", "context is invalid");
-      for (const message of value.context) {
-        if (!isObject(message) || !["system", "user", "assistant", "tool"].includes(String(message.role))) throw new ProtocolError("INVALID_FIELD", "context role is invalid");
-        if (typeof message.content !== "string" || message.content.length > 64 * 1024) throw new ProtocolError("INVALID_FIELD", "context content is invalid");
-        if (message.effect !== undefined && !["none", "pending", "applied", "unknown"].includes(String(message.effect))) throw new ProtocolError("INVALID_FIELD", "context effect is invalid");
-      }
-    }
+  const shapes: Record<string, Schema> = ipcSchema.$defs;
+  if (typeof kind !== "string" || !Object.hasOwn(shapes, kind)) throw new ProtocolError("UNKNOWN_TYPE", "unknown IPC message type");
+  if ((kind === "initialize" || kind === "initialized") && value.protocol !== undefined && value.protocol !== PROTOCOL_VERSION) {
+    throw new ProtocolError("VERSION_MISMATCH", "protocol version is incompatible");
   }
-  if (kind === "turn.cancel") {
-    requiredString(value, "request_id");
-    requiredString(value, "run_id");
-  }
-  if (kind === "heartbeat") requiredString(value, "request_id");
-  if (kind === "tool.result") {
-    requiredString(value, "run_id");
-    requiredString(value, "call_id");
-    requiredString(value, "tool");
-    if (!["success", "error", "cancelled", "unknown"].includes(String(value.status))) throw new ProtocolError("INVALID_FIELD", "invalid tool status");
-  }
-  if (kind === "model.requested") {
-    requiredString(value, "session_id");
-    requiredString(value, "run_id");
-    requiredString(value, "provider");
-    if (value.model_ref !== undefined) requiredString(value, "model_ref");
-    if (!Number.isInteger(value.round) || (value.round as number) < 1 || (value.round as number) > 32) {
-      throw new ProtocolError("INVALID_FIELD", "round is invalid");
-    }
-    if (value.redacted !== true) throw new ProtocolError("INVALID_FIELD", "model activity must be redacted");
-    if (!Array.isArray(value.messages) || value.messages.length === 0 || value.messages.length > 128) {
-      throw new ProtocolError("INVALID_FIELD", "model activity messages are invalid");
-    }
-    for (const message of value.messages) {
-      if (!isObject(message) || !["system", "user", "assistant"].includes(String(message.role))) {
-        throw new ProtocolError("INVALID_FIELD", "model activity role is invalid");
-      }
-      if (typeof message.content !== "string" || message.content.length > 64 * 1024) {
-        throw new ProtocolError("INVALID_FIELD", "model activity content is invalid");
-      }
-    }
-  }
-  if (kind === "initialized" && value.protocol !== PROTOCOL_VERSION) throw new ProtocolError("VERSION_MISMATCH", "protocol version is incompatible");
+  validateSchema(value, shapes[kind]!);
   return value as unknown as IpcMessage;
 }
 

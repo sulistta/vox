@@ -62,7 +62,7 @@ export const TEXT_TOOL_CATALOG: readonly TextToolDescription[] = [
   { name: "desktop.snapshot", effect: "read", arguments: "{app_pid?}" },
   { name: "desktop.query", effect: "read", arguments: "{snapshot_id, query}" },
   { name: "desktop.wait_for", effect: "read", arguments: "{query, timeout_ms?, app_pid?}" },
-  { name: "desktop.act", effect: "arbitrary", arguments: "{snapshot_id, element_ref, action, value?}" },
+  { name: "desktop.act", effect: "write", arguments: "{snapshot_id, element_ref, action, value?}" },
   { name: "clipboard.read", effect: "read", arguments: "{}" },
   { name: "clipboard.write", effect: "write", arguments: "{text}" },
   { name: "files.read", effect: "read", arguments: "{path}" },

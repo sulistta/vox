@@ -29,164 +29,93 @@ pub fn validate_line(line: &str) -> Result<Value, ProtocolError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|error| ProtocolError::InvalidJson(error.to_string()))?;
     let object = value.as_object().ok_or(ProtocolError::NotObject)?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or(ProtocolError::InvalidType)?;
-    const TYPES: &[&str] = &[
-        "initialize",
-        "initialized",
-        "session.open",
-        "session.opened",
-        "turn.start",
-        "turn.cancel",
-        "tool.result",
-        "tool.started",
-        "tool.execute.requested",
-        "tool.completed",
-        "approval.required",
-        "state.changed",
-        "message.delta",
-        "model.requested",
-        "run.completed",
-        "run.failed",
-        "run.cancelled",
-        "heartbeat",
-        "shutdown",
-        "error",
-    ];
-    if !TYPES.contains(&kind) {
-        return Err(ProtocolError::UnknownType(kind.to_string()));
+    let kind = object.get("type").and_then(Value::as_str).ok_or(ProtocolError::InvalidType)?;
+    let schema = schema().get("$defs").and_then(|defs| defs.get(kind))
+        .ok_or_else(|| ProtocolError::UnknownType(kind.to_owned()))?;
+    if matches!(kind, "initialize" | "initialized") {
+        if let Some(version) = object.get("protocol").and_then(Value::as_u64) {
+            if version != PROTOCOL_VERSION { return Err(ProtocolError::VersionMismatch(version)); }
+        }
     }
-    match kind {
-        "turn.start" => {
-            require_string(object, "request_id")?;
-            require_string(object, "session_id")?;
-            require_string(object, "run_id")?;
-            require_string(object, "content")?;
-            if let Some(source) = object.get("source") {
-                if !matches!(source.as_str(), Some("text" | "voice")) {
-                    return Err(ProtocolError::InvalidField("source"));
-                }
-            }
-            if object.get("model_ref").is_some() {
-                require_string(object, "model_ref")?;
-            }
-            if let Some(context) = object.get("context") {
-                let messages = context
-                    .as_array()
-                    .ok_or(ProtocolError::InvalidField("context"))?;
-                if messages.len() > 100 {
-                    return Err(ProtocolError::InvalidField("context"));
-                }
-                for message in messages {
-                    let message = message
-                        .as_object()
-                        .ok_or(ProtocolError::InvalidField("context"))?;
-                    if !matches!(
-                        message.get("role").and_then(Value::as_str),
-                        Some("system" | "user" | "assistant" | "tool")
-                    ) {
-                        return Err(ProtocolError::InvalidField("context.role"));
-                    }
-                    if message
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_none_or(|content| content.len() > 64 * 1024)
-                    {
-                        return Err(ProtocolError::InvalidField("context.content"));
-                    }
-                    if let Some(effect) = message.get("effect") {
-                        if !matches!(
-                            effect.as_str(),
-                            Some("none" | "pending" | "applied" | "unknown")
-                        ) {
-                            return Err(ProtocolError::InvalidField("context.effect"));
-                        }
-                    }
-                }
-            }
-        }
-        "turn.cancel" => {
-            require_string(object, "request_id")?;
-            require_string(object, "run_id")?;
-        }
-        "heartbeat" => {
-            require_string(object, "request_id")?;
-        }
-        "tool.result" => {
-            require_string(object, "run_id")?;
-            require_string(object, "call_id")?;
-            require_string(object, "tool")?;
-            let status = object
-                .get("status")
-                .and_then(Value::as_str)
-                .ok_or(ProtocolError::InvalidField("status"))?;
-            if !["success", "error", "cancelled", "unknown"].contains(&status) {
-                return Err(ProtocolError::InvalidField("status"));
-            }
-        }
-        "model.requested" => {
-            require_string(object, "session_id")?;
-            require_string(object, "run_id")?;
-            require_string(object, "provider")?;
-            if object.get("model_ref").is_some() {
-                require_string(object, "model_ref")?;
-            }
-            if !matches!(object.get("round").and_then(Value::as_u64), Some(1..=32)) {
-                return Err(ProtocolError::InvalidField("round"));
-            }
-            if object.get("redacted").and_then(Value::as_bool) != Some(true) {
-                return Err(ProtocolError::InvalidField("redacted"));
-            }
-            let messages = object
-                .get("messages")
-                .and_then(Value::as_array)
-                .ok_or(ProtocolError::InvalidField("messages"))?;
-            if messages.is_empty() || messages.len() > 128 {
-                return Err(ProtocolError::InvalidField("messages"));
-            }
-            for message in messages {
-                let message = message
-                    .as_object()
-                    .ok_or(ProtocolError::InvalidField("messages"))?;
-                if !matches!(
-                    message.get("role").and_then(Value::as_str),
-                    Some("system" | "user" | "assistant")
-                ) {
-                    return Err(ProtocolError::InvalidField("messages.role"));
-                }
-                if message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_none_or(|content| content.len() > 64 * 1024)
-                {
-                    return Err(ProtocolError::InvalidField("messages.content"));
-                }
-            }
-        }
-        "initialized" => {
-            let version = object
-                .get("protocol")
-                .and_then(Value::as_u64)
-                .ok_or(ProtocolError::InvalidField("protocol"))?;
-            if version != PROTOCOL_VERSION {
-                return Err(ProtocolError::VersionMismatch(version));
-            }
-        }
-        _ => {}
-    }
+    validate_schema(&value, schema, "message")?;
     Ok(value)
 }
 
-fn require_string(
-    object: &serde_json::Map<String, Value>,
-    key: &'static str,
-) -> Result<(), ProtocolError> {
-    match object.get(key).and_then(Value::as_str) {
-        Some(value) if !value.is_empty() && value.len() <= 128 => Ok(()),
-        _ => Err(ProtocolError::InvalidField(key)),
+fn schema() -> &'static Value {
+    static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../schemas/ipc.schema.json"
+    ))).expect("checked-in IPC schema"))
+}
+
+// Deliberately small interpreter for the keywords used by our checked-in schema.
+// Contract tests reject unsupported keywords, so additions cannot silently weaken validation.
+fn validate_schema(value: &Value, schema: &'static Value, field: &'static str) -> Result<(), ProtocolError> {
+    let invalid = || ProtocolError::InvalidField(field);
+    if let Some(expected) = schema.get("const") {
+        let equal = value == expected || (value.is_number() && expected.is_number() && value.as_f64() == expected.as_f64());
+        if !equal { return Err(invalid()); }
     }
+    if let Some(options) = schema.get("enum").and_then(Value::as_array) {
+        if !options.contains(value) { return Err(invalid()); }
+    }
+    let declared_type = schema.get("type");
+    if value.is_null() && declared_type.and_then(Value::as_array).is_some_and(|types| types.iter().any(|kind| kind == "null")) {
+        return Ok(());
+    }
+    let kind = declared_type.and_then(Value::as_str).or_else(|| {
+        declared_type.and_then(Value::as_array).and_then(|types| types.iter().filter_map(Value::as_str).find(|kind| *kind != "null"))
+    });
+    match kind {
+        Some("string") => {
+            let text = value.as_str().ok_or_else(invalid)?;
+            if text.chars().count() < schema.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize
+                || text.len() > schema.get("x-maxUtf8Bytes").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize {
+                return Err(invalid());
+            }
+        }
+        Some("object") => {
+            let object = value.as_object().ok_or_else(invalid)?;
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                for key in required { let key = key.as_str().unwrap();
+                    if !object.contains_key(key) { return Err(ProtocolError::InvalidField(key)); }
+                }
+            }
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (key, rule) in properties {
+                    if let Some(value) = object.get(key) {
+                        let key = match (field, key.as_str()) {
+                            ("context", "effect") => "context.effect",
+                            ("context", "role") => "context.role",
+                            ("context", "content") => "context.content",
+                            ("messages", "role") => "messages.role",
+                            ("messages", "content") => "messages.content",
+                            _ => key.as_str(),
+                        };
+                        validate_schema(value, rule, key)?;
+                    }
+                }
+            }
+        }
+        Some("array") => {
+            let items = value.as_array().ok_or_else(invalid)?;
+            if items.len() < schema.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize
+                || items.len() > schema.get("maxItems").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize {
+                return Err(invalid());
+            }
+            if let Some(rule) = schema.get("items") { for item in items { validate_schema(item, rule, field)?; } }
+        }
+        Some("boolean") => { if !value.is_boolean() { return Err(invalid()); } }
+        Some(kind @ ("number" | "integer")) => {
+            let number = value.as_f64().ok_or_else(invalid)?;
+            if !number.is_finite() || (kind == "integer" && number.fract() != 0.0)
+                || number < schema.get("minimum").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY)
+                || number > schema.get("maximum").and_then(Value::as_f64).unwrap_or(f64::INFINITY) { return Err(invalid()); }
+        }
+        None => {}
+        _ => panic!("unsupported IPC schema type"),
+    }
+    Ok(())
 }
 
 pub fn encode(value: &Value) -> Result<String, ProtocolError> {
@@ -238,6 +167,41 @@ impl RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expand_repeats(value: &mut Value) {
+        if let Some(text) = value.get("$repeat").and_then(Value::as_str) {
+            *value = Value::String(text.repeat(value["count"].as_u64().unwrap() as usize));
+        } else if let Some(items) = value.as_array_mut() {
+            for item in items { expand_repeats(item); }
+        } else if let Some(object) = value.as_object_mut() {
+            for item in object.values_mut() { expand_repeats(item); }
+        }
+    }
+
+    #[test]
+    fn shared_boundary_cases() {
+        let cases: Value = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/contracts/boundary-cases.json"))).unwrap();
+        for case in cases.as_array().unwrap() {
+            let mut message = case["message"].clone();
+            expand_repeats(&mut message);
+            let line = case.get("line").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| message.to_string());
+            let result = validate_line(&line);
+            assert_eq!(result.is_ok(), case["expect"] == "valid", "{}: {:?}", case["name"], result.err());
+        }
+    }
+
+    #[test]
+    fn schema_uses_only_supported_keywords() {
+        fn check(rule: &Value) {
+            for key in rule.as_object().unwrap().keys() {
+                assert!(["type", "const", "enum", "minLength", "maxLength", "x-maxUtf8Bytes", "minimum", "maximum", "required", "properties", "items", "minItems", "maxItems", "additionalProperties"].contains(&key.as_str()), "unsupported keyword {key}");
+            }
+            if let Some(extra) = rule.get("additionalProperties") { assert_eq!(extra, true); }
+            if let Some(properties) = rule.get("properties") { for child in properties.as_object().unwrap().values() { check(child); } }
+            if let Some(items) = rule.get("items") { check(items); }
+        }
+        for rule in schema()["$defs"].as_object().unwrap().values() { check(rule); }
+    }
 
     #[test]
     fn accepts_valid_turn() {
@@ -297,10 +261,7 @@ mod tests {
             "redacted": false,
             "messages": []
         });
-        assert_eq!(
-            validate_line(&invalid.to_string()),
-            Err(ProtocolError::InvalidField("round"))
-        );
+        assert!(validate_line(&invalid.to_string()).is_err());
     }
 
     #[test]

@@ -313,3 +313,46 @@ test("redaction protects text and structured tool observations before model reus
     },
   });
 });
+
+test("core-facing effect labels agree with the Rust policy table", () => {
+  // crates/policy/src/lib.rs classifies desktop.act as Write; the descriptive
+  // label shown to the model and UI must not disagree with it.
+  assert.equal(displayEffectForTool("desktop.act"), "write");
+  assert.equal(displayEffectForTool("shell.exec"), "arbitrary");
+  assert.equal(displayEffectForTool("apps.launch"), "external");
+  assert.equal(displayEffectForTool("clipboard.write"), "write");
+});
+
+test("cancelled SSE streams surface as CANCELLED, not retryable network errors", async () => {
+  const provider = new OpenAICompatibleTextProvider({ baseUrl: "http://127.0.0.1:1", model: "test-model" });
+  const controller = new AbortController();
+  const reader = {
+    read: async () => {
+      controller.abort();
+      throw new Error("The operation was aborted");
+    },
+  } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+  await withMockedFetch(streamingResponse(() => reader), async () => {
+    await assert.rejects(async () => {
+      for await (const _chunk of provider.stream("oi", controller.signal)) {
+        // The abort must be classified before any chunk is produced.
+      }
+    }, (error) => error instanceof ProviderError
+      && error.code === "CANCELLED"
+      && error.retryable === false);
+  });
+});
+
+test("MODEL_MISMATCH-shaped responses keep upstream text classified by status", async () => {
+  const server = await startServer(() => ({ status: 500, body: "boom" }));
+  try {
+    const provider = new OpenAICompatibleTextProvider({ baseUrl: server.url, model: "test-model" });
+    await assert.rejects(async () => {
+      for await (const _chunk of provider.stream("oi", new AbortController().signal)) {
+        // The request is expected to fail before producing a chunk.
+      }
+    }, (error) => error instanceof ProviderError && error.code === "PROVIDER_ERROR" && error.retryable === true);
+  } finally {
+    await server.close();
+  }
+});

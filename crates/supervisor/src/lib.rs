@@ -319,7 +319,7 @@ impl AgentSupervisor {
         error_code: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), SupervisorError> {
-        self.send(&json!({
+        let mut message = json!({
             "type":"tool.result",
             "run_id":run_id,
             "call_id":call_id,
@@ -327,10 +327,11 @@ impl AgentSupervisor {
             "status":status,
             "side_effect":side_effect,
             "data":data,
-            "error_code":error_code,
-            "error":error,
             "verification":verification.cloned().unwrap_or_else(|| json!({"observed":false}))
-        }))
+        });
+        if let Some(error_code) = error_code { message["error_code"] = json!(error_code); }
+        if let Some(error) = error { message["error"] = json!(error); }
+        self.send(&message)
     }
 
     pub fn try_event(&self) -> Option<Result<Value, ProtocolError>> {

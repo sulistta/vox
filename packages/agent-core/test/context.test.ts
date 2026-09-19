@@ -1,29 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactContext, ContextCompactionError, formatContext } from "../src/context.js";
+import { compactConversation } from "../src/context.js";
+import { RunLimitError } from "../src/limits.js";
 
-test("context compaction preserves objective and uncertain effects before recent history", () => {
-  const result = compactContext([
-    { role: "system", content: "restrição: nunca apagar dados" },
-    { role: "user", content: "objetivo antigo" },
-    { role: "assistant", content: "observação longa que pode ser removida porque não é um fato obrigatório ".repeat(5) },
-    { role: "tool", content: "efeito ainda incerto", effect: "unknown" },
-    { role: "assistant", content: "última observação" },
+test("the runtime conversation compactor preserves required turns and marks dropped history", () => {
+  const system = "system";
+  const result = compactConversation([
+    { message: { role: "system", content: system }, required: true },
+    { message: { role: "user", content: "objetivo antigo" }, required: false },
+    { message: { role: "user", content: "ferramenta pendente" }, required: true },
+    { message: { role: "user", content: "histórico descartável".repeat(30) }, required: false },
+    { message: { role: "user", content: "pedido atual" }, required: true },
   ], 300);
-  assert.equal(result.dropped > 0, true);
-  assert.equal(result.messages.some((message) => message.content.includes("nunca apagar")), true);
-  assert.equal(result.messages.some((message) => message.effect === "unknown"), true);
-  assert.equal(result.messages.some((message) => message.content.includes("última observação")), true);
-  assert.equal(result.messages.some((message) => message.content.includes("contexto compactado")), true);
+  assert.equal(result.length >= 4, true);
+  assert.equal(result[0]?.content, system);
+  assert.equal(result.some((message) => message.content.includes("ferramenta pendente")), true);
+  assert.equal(result.some((message) => message.content.includes("pedido atual")), true);
+  assert.equal(result.some((message) => message.content.includes("mensagens antigas foram omitidas")), true);
+  assert.equal(result.some((message) => message.content === "histórico descartável"), false);
 });
 
-test("context compaction refuses to drop required facts when the budget is too small", () => {
-  assert.throws(
-    () => compactContext([{ role: "system", content: "x".repeat(300) }, { role: "tool", content: "pending", effect: "pending" }], 256),
-    (error) => error instanceof ContextCompactionError,
-  );
+test("the runtime conversation compactor keeps required context that fits and rejects tiny budgets", () => {
+  const entries = [
+    { message: { role: "system" as const, content: "system prompt" }, required: true },
+    { message: { role: "user" as const, content: "observação obrigatória pendente" }, required: true },
+  ];
+  assert.deepEqual(compactConversation(entries, 512).map((message) => message.content), [
+    "system prompt",
+    "observação obrigatória pendente",
+  ]);
+  assert.throws(() => compactConversation(entries, 20), (error) => error instanceof RunLimitError);
 });
 
-test("formatted context remains plain text and appends the current user turn", () => {
-  assert.equal(formatContext([{ role: "assistant", content: "linha" }], "agora"), "[assistant] linha\n[user] agora");
-});

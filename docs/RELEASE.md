@@ -10,10 +10,15 @@ recorte de componentes Rust/Node usado no bundle dev. Isso ainda não é o
 instalador de T055 nem fecha T060.
 
 O recorte Linux também inclui `linux/install.sh` e `linux/uninstall.sh`: a
-instalação é feita em um prefixo de usuário com troca atômica, o manifesto e o
+instalação é feita em um prefixo de usuário com backup da versão anterior e
+restauração automática se a ativação falhar (um backup recuperável é mantido e
+apontado quando a restauração automática não é possível), o manifesto e o
 SBOM são verificados antes da cópia e a desinstalação preserva os dados até
 `--remove-data` ser informado explicitamente. O tarball Linux pode ser gerado
-com `pnpm package:linux` e recebe um `.sha256` separado.
+com `pnpm package:linux` e recebe um `.sha256` separado. As transações de
+instalação, atualização, falha de cópia, falha de ativação e falha de
+restauração são exercidadas por `tests/installer_test.py` em prefixos
+temporários isolados.
 
 ## Gate de artefato
 
@@ -47,7 +52,8 @@ pnpm package:linux /tmp/vox-linux-dev.tar.gz
 ```
 
 Esse smoke valida o manifesto e o SBOM, instala duas cópias temporárias pelo
-launcher do bundle, preserva o SQLite durante uma troca v1→v2 e rollback v2→v1,
+launcher do bundle e preserva o SQLite durante a troca entre cópias do mesmo
+build. Isso verifica relançamento, não migração ou rollback entre versões distintas. O smoke
 testa que a desinstalação mantém os dados até a
 remoção explicitamente solicitada, rejeita uma cópia adulterada antes da
 instalação e depois apaga apenas o diretório temporário.

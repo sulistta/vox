@@ -64,9 +64,10 @@ conta em Preferências e grave a chave pelo botão explícito. Endpoint e modelo
 também podem ser editados nas Preferências; quando não há run ativo, a mudança
 reinicia somente o core privado e mantém a janela/sessão. O Vox usa
 `secret-tool`/libsecret, não cria arquivo de fallback e injeta a chave somente
-no próximo processo privado do core. Se `secret-tool` não estiver instalado,
-a indisponibilidade deve ser corrigida no ambiente; não coloque a chave no
-SQLite ou em logs. Em macOS e Windows, o build usa os backends nativos de
+no próximo processo privado do core. Em Ubuntu/Debian, se a Preferência informar
+que `secret-tool` não está instalado, execute `sudo apt install libsecret-tools`,
+reabra o Vox e salve a chave novamente. Não coloque a chave no SQLite ou em
+logs. Em macOS e Windows, o build usa os backends nativos de
 Keychain/Credential Manager; a aceitação desses backends depende da execução na
 matriz CI e nas máquinas de referência.
 

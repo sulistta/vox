@@ -10,6 +10,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum SecretError {
+    #[error("the Linux keyring utility secret-tool is not installed")]
+    NativeToolMissing,
     #[error("keyring backend is unavailable: {0}")]
     Unavailable(String),
     #[error("keyring account is invalid")]
@@ -263,9 +265,9 @@ impl SecretStore {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         apply_minimal_environment(&mut command);
-        let mut child = command.spawn().map_err(|error| {
-            SecretError::Unavailable(format!("{}: command could not start", error.kind()))
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| self.command_start_error(error))?;
         let mut input_writer = input.map(|input| {
             let mut pipe = child
                 .stdin
@@ -303,6 +305,15 @@ impl SecretStore {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn command_start_error(&self, error: std::io::Error) -> SecretError {
+        #[cfg(target_os = "linux")]
+        if matches!(&self.backend, Backend::Native) && error.kind() == std::io::ErrorKind::NotFound
+        {
+            return SecretError::NativeToolMissing;
+        }
+        SecretError::Unavailable(format!("{}: command could not start", error.kind()))
     }
 }
 
@@ -749,5 +760,15 @@ mod tests {
             Err(SecretError::TooLarge)
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_secret_tool_has_an_actionable_error() {
+        let store = SecretStore::native("vox-test");
+        assert!(matches!(
+            store.command_start_error(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            SecretError::NativeToolMissing
+        ));
     }
 }

@@ -24,7 +24,13 @@ function collect(proc: ReturnType<typeof spawn>): AsyncGenerator<Record<string, 
   });
   return (async function* () {
     while (true) {
-      if (queue.length === 0) await new Promise<void>((resolve) => { wake = resolve; });
+      if (queue.length === 0) await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          proc.kill();
+          reject(new Error("Core did not emit an expected event within 5 seconds"));
+        }, 5_000);
+        wake = () => { clearTimeout(timer); resolve(); };
+      });
       yield queue.shift()!;
     }
   })();
@@ -46,6 +52,105 @@ test("core performs handshake and a fake textual turn", async () => {
   assert.equal(seen.includes("message.delta"), true);
   assert.equal(seen.at(-1), "run.completed");
   proc.stdin.end();
+});
+
+test("core retries one malformed model decision without treating it as an action", async () => {
+  let requestCount = 0;
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    const content = requestCount === 1
+      ? "Claro, vou ajudar com isso."
+      : JSON.stringify({ type: "final", content: "Resposta após a correção de formato." });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const proc = spawn(process.execPath, ["--import", "tsx", core], {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      VOX_PROVIDER: "openai-compatible",
+      VOX_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}`,
+      VOX_PROVIDER_MODEL: "test-model",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  try {
+    const events = collect(proc);
+    proc.stdin.write('{"type":"initialize"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"session.open","request_id":"repair-open","session_id":"repair-session"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"turn.start","request_id":"repair-turn","session_id":"repair-session","run_id":"repair-run","content":"oi"}\n');
+
+    let completed = "";
+    let toolRequested = false;
+    let correctionVisibleInActivity = false;
+    for await (const event of events) {
+      if (event.type === "model.requested") {
+        const messages = event.messages as Array<{ role: string; content: string }>;
+        correctionVisibleInActivity ||= messages.some((message) => message.content.includes("resposta anterior não foi aceita"));
+      }
+      if (event.type === "tool.execute.requested") toolRequested = true;
+      if (event.type === "run.completed") {
+        completed = String(event.content);
+        break;
+      }
+      if (event.type === "run.failed") {
+        assert.fail(`format repair failed: ${JSON.stringify(event)}`);
+      }
+    }
+
+    assert.equal(requestCount, 2);
+    assert.equal(correctionVisibleInActivity, true);
+    assert.equal(toolRequested, false);
+    assert.equal(completed, "Resposta após a correção de formato.");
+  } finally {
+    proc.stdin.end();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("core emits liveness while it waits for a tool result", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], {
+    cwd: packageRoot,
+    env: { ...process.env, VOX_PROVIDER: "fake-tools" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  try {
+    const events = collect(proc);
+    proc.stdin.write('{"type":"initialize"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"session.open","request_id":"liveness-open","session_id":"liveness-session"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"turn.start","request_id":"liveness-turn","session_id":"liveness-session","run_id":"liveness-run","content":"mostrar janelas"}\n');
+
+    let toolRequested = false;
+    let livenessReceived = false;
+    let cancelled = false;
+    for await (const event of events) {
+      if (event.type === "tool.execute.requested") toolRequested = true;
+      if (event.type === "heartbeat" && String(event.request_id).startsWith("run-liveness:")) {
+        livenessReceived = true;
+        proc.stdin.write('{"type":"turn.cancel","request_id":"liveness-cancel","run_id":"liveness-run"}\n');
+      }
+      if (event.type === "run.cancelled") {
+        cancelled = true;
+        break;
+      }
+      if (event.type === "run.failed" || event.type === "run.completed") {
+        assert.fail(`liveness run ended unexpectedly: ${JSON.stringify(event)}`);
+      }
+    }
+
+    assert.equal(toolRequested, true);
+    assert.equal(livenessReceived, true);
+    assert.equal(cancelled, true);
+  } finally {
+    proc.stdin.end();
+  }
 });
 
 test("invalid provider configuration becomes a structured turn failure instead of ending the core", async () => {
@@ -149,6 +254,10 @@ test("core pauses for the broker and resumes only with the matching tool result"
           verification: { observed: true },
         }) + "\n",
       );
+    }
+    if (event.type === "error" || event.type === "run.failed") {
+      proc.kill();
+      assert.fail(`broker exchange failed: ${JSON.stringify(event)}`);
     }
     if (event.type === "run.completed") break;
   }
@@ -362,4 +471,149 @@ test("core cancellation reaches the provider and emits a terminal cancelled even
   }
   assert.equal(cancelled, true);
   proc.stdin.end();
+});
+
+test("a run cancelled after a broker-confirmed write reports that effect", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], {
+    cwd: packageRoot,
+    env: { ...process.env, VOX_PROVIDER: "fake-tools" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const events = collect(proc);
+  try {
+    proc.stdin.write('{"type":"initialize"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"session.open","request_id":"open-cancel-effect","session_id":"s-cancel-effect"}\n');
+    await events.next();
+    proc.stdin.write(
+      JSON.stringify({ type: "turn.start", request_id: "turn-cancel-effect", session_id: "s-cancel-effect", run_id: "r-cancel-effect", content: "mostre as janelas" }) + "\n",
+    );
+    let cancelled: Record<string, unknown> | undefined;
+    for await (const event of events) {
+      if (event.type === "tool.execute.requested" && event.tool === "desktop.list_windows") {
+        proc.stdin.write(JSON.stringify({
+          type: "tool.result",
+          run_id: "r-cancel-effect",
+          call_id: event.call_id,
+          tool: "desktop.list_windows",
+          status: "success",
+          side_effect: "applied",
+          data: {},
+        }) + "\n");
+        proc.stdin.write(JSON.stringify({ type: "turn.cancel", request_id: "cancel-cancel-effect", run_id: "r-cancel-effect" }) + "\n");
+      }
+      if (event.type === "run.cancelled") {
+        cancelled = event;
+        break;
+      }
+      if (event.type === "run.failed" || event.type === "run.completed") break;
+    }
+    assert.equal(cancelled?.completed_effects, 1);
+  } finally {
+    proc.stdin.end();
+  }
+});
+
+test("final content preserves newlines across streamed deltas", async () => {
+  const finalDecision = JSON.stringify({ type: "final", content: "linha um\n\nlinha três" });
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content: finalDecision } }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const proc = spawn(process.execPath, ["--import", "tsx", core], {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      VOX_PROVIDER: "openai-compatible",
+      VOX_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}`,
+      VOX_PROVIDER_MODEL: "test-model",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  try {
+    const events = collect(proc);
+    proc.stdin.write('{"type":"initialize"}\n');
+    await events.next();
+    proc.stdin.write('{"type":"session.open","request_id":"open-newlines","session_id":"s-newlines"}\n');
+    await events.next();
+    proc.stdin.write(
+      JSON.stringify({ type: "turn.start", request_id: "turn-newlines", session_id: "s-newlines", run_id: "r-newlines", content: "responda" }) + "\n",
+    );
+    let streamed = "";
+    let completed = "";
+    for await (const event of events) {
+      if (event.type === "message.delta") streamed += String(event.delta ?? "");
+      if (event.type === "run.completed") {
+        completed = String(event.content);
+        break;
+      }
+      if (event.type === "run.failed") {
+        assert.fail(`model loop failed: ${JSON.stringify(event)}`);
+      }
+    }
+    assert.equal(streamed, "linha um\n\nlinha três");
+    assert.equal(completed, "linha um\n\nlinha três");
+  } finally {
+    proc.stdin.end();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("requests before the initialize handshake are refused", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], { cwd: packageRoot, stdio: ["pipe", "pipe", "pipe"] });
+  const events = collect(proc);
+  proc.stdin.write('{"type":"heartbeat","request_id":"early-heartbeat"}\n');
+  const error = (await events.next()).value!;
+  assert.equal(error.type, "error");
+  assert.equal(error.error_code, "NOT_INITIALIZED");
+  proc.stdin.write('{"type":"initialize"}\n');
+  assert.equal((await events.next()).value?.type, "initialized");
+  proc.stdin.end();
+});
+
+test("an explicitly incompatible protocol version is rejected", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], { cwd: packageRoot, stdio: ["pipe", "pipe", "pipe"] });
+  const events = collect(proc);
+  proc.stdin.write('{"type":"initialize","protocol":99}\n');
+  const error = (await events.next()).value!;
+  assert.equal(error.type, "error");
+  assert.equal(error.error_code, "VERSION_MISMATCH");
+  proc.stdin.end();
+});
+
+test("oversized unfinished input is discarded and a later frame still works", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], { cwd: packageRoot, stdio: ["pipe", "pipe", "pipe"] });
+  const events = collect(proc);
+  try {
+    proc.stdin.write("x".repeat(1024 * 1024 + 2));
+    assert.equal((await events.next()).value?.error_code, "MESSAGE_TOO_LARGE");
+    proc.stdin.write('\n{"type":"initialize"}\r\n');
+    assert.equal((await events.next()).value?.type, "initialized");
+    proc.stdin.write('{"type":"heartbeat","request_id":"after-large-frame"}\n');
+    assert.equal((await events.next()).value?.request_id, "after-large-frame");
+  } finally {
+    proc.stdin.end();
+    proc.kill();
+  }
+});
+
+test("shutdown ends the core process promptly", async () => {
+  const proc = spawn(process.execPath, ["--import", "tsx", core], { cwd: packageRoot, stdio: ["pipe", "pipe", "pipe"] });
+  const events = collect(proc);
+  proc.stdin.write('{"type":"initialize"}\n');
+  await events.next();
+  const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+  proc.stdin.write('{"type":"shutdown"}\n');
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([exited, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("core did not exit after shutdown")), 5_000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+    proc.kill();
+  }
 });

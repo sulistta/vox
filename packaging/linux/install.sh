@@ -43,10 +43,24 @@ test -f "$bundle_dir/sbom.cdx.json"
 parent="$(dirname -- "$prefix")"
 mkdir -p -- "$parent"
 stage="$(mktemp -d "$parent/.vox-install.XXXXXX")"
-backup="${prefix}.previous.$$"
+backup=""
 cleanup() {
+  local status=$?
   rm -rf -- "$stage"
-  rm -rf -- "$backup"
+  if [ -n "$backup" ] && { [ -e "$backup/prefix" ] || [ -L "$backup/prefix" ]; }; then
+    if [ ! -e "$prefix" ] && [ ! -L "$prefix" ]; then
+      if mv -- "$backup/prefix" "$prefix"; then
+        rmdir -- "$backup"
+      else
+        echo "restauração falhou; instalação anterior preservada em $backup/prefix" >&2
+      fi
+    else
+      echo "instalação anterior preservada em $backup/prefix" >&2
+    fi
+  elif [ -n "$backup" ]; then
+    rmdir -- "$backup"
+  fi
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -71,10 +85,17 @@ StartupNotify=true
 EOF
 
 if [ -e "$prefix" ] || [ -L "$prefix" ]; then
-  mv -- "$prefix" "$backup"
+  backup="$(mktemp -d "$parent/.vox-previous.XXXXXX")"
+  mv -- "$prefix" "$backup/prefix"
 fi
-mv -- "$stage" "$prefix"
-trap - EXIT
-rm -rf -- "$backup"
-echo "Vox instalado em $prefix"
-echo "Os dados do usuário permanecem no diretório configurado pelo Vox."
+if mv -- "$stage" "$prefix"; then
+  trap - EXIT
+  if [ -n "$backup" ]; then
+    rm -rf -- "$backup"
+  fi
+  echo "Vox instalado em $prefix"
+  echo "Os dados do usuário permanecem no diretório configurado pelo Vox."
+else
+  echo "falha ao instalar o novo prefixo; restaurando instalação anterior" >&2
+  exit 1
+fi

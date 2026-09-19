@@ -1,75 +1,57 @@
-import type { ContextMessage } from "@vox/protocol";
+import type { ProviderMessage } from "@vox/provider-adapters";
+import { RunLimitError } from "./limits.js";
 
-export class ContextCompactionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ContextCompactionError";
-  }
+export interface ConversationEntry {
+  message: ProviderMessage;
+  required: boolean;
 }
 
-export interface CompactedContext {
-  messages: ContextMessage[];
-  dropped: number;
-  characters: number;
+function messageCost(message: ProviderMessage): number {
+  return message.role.length + message.content.length + 8;
 }
-
-const requiredMessage = (message: ContextMessage, index: number): boolean =>
-  index === 0 || message.role === "system" || message.effect === "pending" || message.effect === "unknown";
-
-const messageCost = (message: ContextMessage): number => message.role.length + message.content.length + 4;
 
 /**
- * Keep objective/constraints, all uncertain effects, and the newest context
- * that fits. Dropped context is represented explicitly; it is never silently
- * presented as if the model had seen the complete history.
+ * Preserve the current task, system constraints and uncertain observations,
+ * then fill the remaining model context with the newest history. The original
+ * entries are retained so subsequent rounds can compact against the same
+ * complete turn state instead of silently mutating it.
  */
-export function compactContext(messages: readonly ContextMessage[], maxCharacters: number): CompactedContext {
+export function compactConversation(entries: readonly ConversationEntry[], maxCharacters: number): ProviderMessage[] {
   if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 256) {
-    throw new ContextCompactionError("context budget is too small");
+    throw new RunLimitError("CONTEXT_LIMIT", "context budget is too small");
   }
-  const indexed = messages.map((message, index) => ({ message, index }));
   const selected = new Set<number>();
-  for (const item of indexed) if (requiredMessage(item.message, item.index)) selected.add(item.index);
   let characters = 0;
-  for (const index of selected) {
-    const message = messages[index];
-    if (!message) throw new ContextCompactionError("context index is invalid");
-    characters += messageCost(message);
+  for (const [index, entry] of entries.entries()) {
+    if (!entry.required) continue;
+    const next = characters + messageCost(entry.message);
+    if (next > maxCharacters || selected.size >= 128) {
+      throw new RunLimitError("CONTEXT_LIMIT", "required context does not fit the model budget");
+    }
+    selected.add(index);
+    characters = next;
   }
-  if (characters > maxCharacters) throw new ContextCompactionError("required context does not fit the model budget");
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (selected.has(index)) continue;
-    const message = messages[index];
-    if (!message) throw new ContextCompactionError("context index is invalid");
-    const next = characters + messageCost(message);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (selected.has(index) || selected.size >= 128) continue;
+    const entry = entries[index];
+    if (!entry) continue;
+    const next = characters + messageCost(entry.message);
     if (next > maxCharacters) continue;
     selected.add(index);
     characters = next;
   }
-  const ordered: ContextMessage[] = [];
-  for (const index of [...selected].sort((left, right) => left - right)) {
-    const message = messages[index];
-    if (!message) throw new ContextCompactionError("context index is invalid");
-    ordered.push(message);
+  const messages = [...selected]
+    .sort((left, right) => left - right)
+    .map((index) => entries[index]?.message)
+    .filter((message): message is ProviderMessage => message !== undefined);
+  const dropped = entries.length - selected.size;
+  const marker: ProviderMessage = {
+    role: "system",
+    content: `[${dropped} mensagens antigas foram omitidas por limite de contexto; não suponha que elas ainda estejam disponíveis.]`,
+  };
+  if (dropped > 0 && messages.length < 128 && characters + messageCost(marker) <= maxCharacters) {
+    messages.splice(1, 0, marker);
   }
-  const dropped = messages.length - ordered.length;
-  if (dropped > 0) {
-    const marker: ContextMessage = {
-      role: "system",
-      content: `[contexto compactado: ${dropped} mensagens antigas não foram incluídas; confirme novamente qualquer fato necessário]`,
-    };
-    if (characters + messageCost(marker) <= maxCharacters) {
-      const firstNonSystem = ordered.findIndex((message) => message.role !== "system");
-      const insertion = firstNonSystem < 0 ? ordered.length : firstNonSystem;
-      ordered.splice(insertion, 0, marker);
-      characters += messageCost(marker);
-    }
-  }
-  return { messages: ordered, dropped, characters };
+  return messages;
 }
 
-export function formatContext(messages: readonly ContextMessage[], currentPrompt: string): string {
-  const history = messages.map((message) => `[${message.role}] ${message.content}`).join("\n");
-  return history ? `${history}\n[user] ${currentPrompt}` : currentPrompt;
-}

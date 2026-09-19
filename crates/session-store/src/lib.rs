@@ -1,4 +1,4 @@
-use rusqlite::{backup::Backup, params, Connection, OptionalExtension};
+use rusqlite::{backup::Backup, params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -83,15 +83,56 @@ pub struct SessionStore {
     connection: Connection,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 impl SessionStore {
+    /// Compatibility opener for offline users. Refuse recovery while any desktop
+    /// owns the database; desktop callers must use `open_for_desktop`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_owned(path.as_ref(), None).map_err(classify_store_error)
+    }
+
+    /// Acquire ownership and recover in one write transaction. A losing
+    /// instance cannot migrate, scrub or interrupt the live owner's records.
+    pub fn open_for_desktop(
+        path: impl AsRef<Path>,
+        owner_id: &str,
+        stale_after: Duration,
+    ) -> Result<Self, StoreError> {
+        Self::open_owned(path.as_ref(), Some((owner_id, stale_after)))
+            .map_err(classify_store_error)
+    }
+
+    fn open_owned(path: &Path, owner: Option<(&str, Duration)>) -> Result<Self, StoreError> {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let connection = Connection::open(path).map_err(classify_sql_error)?;
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let store = Self { connection };
-        store.migrate().map_err(classify_store_error)?;
-        store.redact_legacy_sensitive_values()?;
-        store.recover_interrupted()?;
+        {
+            let transaction = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)?;
+            store.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS desktop_lease(id INTEGER PRIMARY KEY CHECK (id = 1), owner_id TEXT NOT NULL, heartbeat_at INTEGER NOT NULL);"
+            ).map_err(classify_sql_error)?;
+            match owner {
+                Some((owner_id, stale_after)) => {
+                    if !store.acquire_desktop_lease(owner_id, stale_after)? {
+                        return Err(StoreError::LeaseNotOwned);
+                    }
+                }
+                None => {
+                    let count: i64 = store.connection.query_row("SELECT COUNT(*) FROM desktop_lease", [], |row| row.get(0))?;
+                    if count != 0 {
+                        return Err(StoreError::LeaseNotOwned);
+                    }
+                }
+            }
+            store.migrate().map_err(classify_store_error)?;
+            store.redact_legacy_sensitive_values()?;
+            store.recover_interrupted()?;
+            transaction.commit()?;
+        }
         Ok(store)
     }
 
@@ -134,6 +175,17 @@ impl SessionStore {
         // is redacted before it reaches this table.
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS session_drafts(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, content TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )?;
+        self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        // Legacy journals used unrelated run IDs: retain those audit/idempotency
+        // fences. Only records linked to a deleted run can be safely attributed.
+        // A trigger keeps explicit deletion and retention equally atomic.
+        self.connection.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS runs_delete_journal BEFORE DELETE ON runs BEGIN
+                 DELETE FROM effects WHERE run_id=OLD.id;
+                 DELETE FROM approvals WHERE run_id=OLD.id;
+             END;
+             CREATE INDEX IF NOT EXISTS effects_run ON effects(run_id);"
         )?;
         self.connection.execute("INSERT OR IGNORE INTO migrations(version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", params![CURRENT_SCHEMA_VERSION])?;
         Ok(())
@@ -270,7 +322,51 @@ impl SessionStore {
                 context.push(message);
             }
         }
-        Ok(context)
+        // IPC v1 accepts at most 64 KiB per history message and a 1 MiB
+        // frame. Keep the newest context within a conservative serialized
+        // budget, including JSON escaping, without splitting UTF-8 characters.
+        let mut remaining = 256 * 1024;
+        let mut bounded = Vec::new();
+        for mut message in context.into_iter().rev() {
+            if message.content.len() > 64 * 1024 {
+                let marker = "\n[history truncated]";
+                let mut end = 64 * 1024 - marker.len();
+                while !message.content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                message.content.truncate(end);
+                message.content.push_str(marker);
+            }
+            let size = serde_json::to_vec(&message).map_or(usize::MAX, |value| value.len() + 1);
+            if size > remaining {
+                break;
+            }
+            remaining -= size;
+            bounded.push(message);
+        }
+        bounded.reverse();
+        Ok(bounded)
+    }
+
+    /// Prepare the durable turn before any IPC is sent. Failure rolls back
+    /// both the message and run; the returned run ID is also the IPC run ID.
+    pub fn prepare_turn(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        model_ref: Option<&str>,
+        content: &str,
+    ) -> Result<(RunRecord, Vec<ModelContextMessage>), StoreError> {
+        let transaction = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        if !self.renew_desktop_lease(owner_id)? {
+            return Err(StoreError::LeaseNotOwned);
+        }
+        let sequence = self.next_message_sequence(session_id)?;
+        let context = self.model_context_before(session_id, sequence, 100)?;
+        let run = self.start_run(session_id, model_ref)?;
+        self.append_message(session_id, "user", content, sequence)?;
+        transaction.commit()?;
+        Ok((run, context))
     }
 
     pub fn start_run(
@@ -759,7 +855,8 @@ impl SessionStore {
     }
 }
 
-fn redact_sensitive(value: &str) -> String {
+/// Shared credential redaction for persistence and desktop display boundaries.
+pub fn redact_sensitive(value: &str) -> String {
     let mut redacted = value.to_owned();
     for marker in [
         "Bearer ",
@@ -795,6 +892,10 @@ fn redact_sensitive(value: &str) -> String {
         "\"credencial\":",
         "\"credenciais\":",
         "\"authorization\":",
+        "\"autorização\":",
+        "\"access_token\":",
+        "access_token=",
+        "access_token:",
     ] {
         let mut cursor = 0;
         while let Some(relative) = find_ascii_case_insensitive(&redacted[cursor..], marker) {
@@ -827,7 +928,10 @@ fn redact_sensitive(value: &str) -> String {
                 redacted.replace_range(value_start..end, "[REDACTED]");
                 cursor = value_start + "[REDACTED]".len();
             } else {
-                cursor = value_start.saturating_add(1);
+                match redacted[value_start..].chars().next() {
+                    Some(character) => cursor = value_start + character.len_utf8(),
+                    None => break,
+                }
             }
         }
     }
@@ -846,19 +950,22 @@ fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
                 .map(|(key, value)| {
                     let normalized = key.to_ascii_lowercase();
                     let sensitive = [
+                        "access_token",
+                        "access-token",
                         "api_key",
                         "api-key",
                         "authorization",
+                        "autorização",
                         "cookie",
                         "credential",
                         "credencial",
                         "credenciais",
                         "password",
-                        "senha",
                         "private_key",
                         "private-key",
                         "secret",
                         "segredo",
+                        "senha",
                         "token",
                         "chave",
                     ]
@@ -909,6 +1016,27 @@ fn classify_store_error(error: StoreError) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redaction_handles_empty_credentials_and_unicode_boundaries() {
+        for text in [
+            "token=",
+            "Bearer ",
+            "sk-",
+            "password=   ",
+            "token=\"",
+            "token=\"\"",
+            "token=\u{2003} senha=segredo",
+        ] {
+            let result = redact_sensitive(text);
+            if text.ends_with("senha=segredo") {
+                assert_eq!(result, "token=\u{2003} senha=[REDACTED]");
+            } else {
+                assert_eq!(result, text);
+            }
+        }
+        assert_eq!(redact_sensitive("token=ação"), "token=[REDACTED]");
+    }
 
     #[test]
     fn persists_messages_and_marks_open_runs_interrupted() {

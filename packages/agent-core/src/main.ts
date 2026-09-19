@@ -1,7 +1,7 @@
-import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import {
   PROTOCOL_VERSION,
+  MAX_MESSAGE_BYTES,
   ProtocolError,
   encodeMessage,
   parseMessage,
@@ -21,6 +21,7 @@ import {
 } from "@vox/provider-adapters";
 import type { NormalizedToolCall, ProviderInput, ProviderMessage, TextProvider } from "@vox/provider-adapters";
 import { RunBudget, RunLimitError } from "./limits.js";
+import { compactConversation, type ConversationEntry } from "./context.js";
 
 /**
  * Keep the IPC process alive when provider configuration is invalid.  A
@@ -59,7 +60,7 @@ function configuredProvider(): TextProvider {
 
 const provider = configuredProvider();
 const sessions = new Set<string>();
-const runs = new Map<string, { controller: AbortController; sessionId: string }>();
+const runs = new Map<string, { controller: AbortController; sessionId: string; completedEffects: number }>();
 const pendingTools = new Map<
   string,
   { runId: string; tool: string; resolve: (result: ToolResultMessage) => void }
@@ -78,10 +79,19 @@ const MODEL_DECISION_PROMPT = [
   `Ferramentas disponíveis: ${TEXT_TOOL_CATALOG.map((tool) => `${tool.name} ${tool.arguments}`).join("; ")}.`,
 ].join("\n");
 
-interface ConversationEntry {
-  message: ProviderMessage;
-  required: boolean;
-}
+// Some OpenAI-compatible models occasionally answer the user in prose even
+// after receiving the decision contract. Retry once with a static correction
+// instead of treating that first malformed answer as an executable intent.
+// The response itself is intentionally never returned to the model or UI.
+const MODEL_DECISION_REPAIR_PROMPT = [
+  "A resposta anterior não foi aceita porque não era uma decisão JSON válida.",
+  "Responda novamente SOMENTE com um objeto JSON que siga exatamente o formato já definido, sem Markdown ou texto adicional.",
+].join(" ");
+const MAX_INVALID_MODEL_DECISION_RETRIES = 1;
+// The desktop process may briefly stop repainting while a native window is
+// occluded or a system dialog is active. Keep liveness independent from its
+// outbound heartbeat requests while a run is waiting for a model or tool.
+const RUN_LIVENESS_INTERVAL_MS = 2_000;
 
 function send(message: IpcMessage): void {
   process.stdout.write(encodeMessage(message));
@@ -93,55 +103,6 @@ function log(message: string): void {
 
 function state(session_id: string, run_id: string, value: "thinking" | "executing" | "cancelling"): void {
   send({ type: "state.changed", session_id, run_id, state: value });
-}
-
-function messageCost(message: ProviderMessage): number {
-  return message.role.length + message.content.length + 8;
-}
-
-/**
- * Preserve the current task, system constraints and uncertain observations,
- * then fill the remaining model context with the newest history. The original
- * entries are retained so subsequent rounds can compact against the same
- * complete turn state instead of silently mutating it.
- */
-function compactConversation(entries: readonly ConversationEntry[], maxCharacters: number): ProviderMessage[] {
-  if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 256) {
-    throw new RunLimitError("CONTEXT_LIMIT", "context budget is too small");
-  }
-  const selected = new Set<number>();
-  let characters = 0;
-  for (const [index, entry] of entries.entries()) {
-    if (!entry.required) continue;
-    const next = characters + messageCost(entry.message);
-    if (next > maxCharacters || selected.size >= 128) {
-      throw new RunLimitError("CONTEXT_LIMIT", "required context does not fit the model budget");
-    }
-    selected.add(index);
-    characters = next;
-  }
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (selected.has(index) || selected.size >= 128) continue;
-    const entry = entries[index];
-    if (!entry) continue;
-    const next = characters + messageCost(entry.message);
-    if (next > maxCharacters) continue;
-    selected.add(index);
-    characters = next;
-  }
-  const messages = [...selected]
-    .sort((left, right) => left - right)
-    .map((index) => entries[index]?.message)
-    .filter((message): message is ProviderMessage => message !== undefined);
-  const dropped = entries.length - selected.size;
-  const marker: ProviderMessage = {
-    role: "system",
-    content: `[${dropped} mensagens antigas foram omitidas por limite de contexto; não suponha que elas ainda estejam disponíveis.]`,
-  };
-  if (dropped > 0 && messages.length < 128 && characters + messageCost(marker) <= maxCharacters) {
-    messages.splice(1, 0, marker);
-  }
-  return messages;
 }
 
 function contextEntry(role: "system" | "user" | "assistant" | "tool", content: string, effect?: string): ConversationEntry {
@@ -267,7 +228,7 @@ async function emitFinalContent(
   signal: AbortSignal,
 ): Promise<number> {
   let seq = sequence;
-  for (const delta of content.match(/.{1,1024}/gu) ?? [content]) {
+  for (const delta of content.match(/.{1,1024}/gsu) ?? [content]) {
     if (signal.aborted) throw new ProviderError("CANCELLED", "provider cancelled", false);
     seq += 1;
     send({ type: "message.delta", session_id: sessionId, run_id: runId, seq, delta });
@@ -277,6 +238,7 @@ async function emitFinalContent(
     // its handoff to the desktop UI.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
+  if (signal.aborted) throw new ProviderError("CANCELLED", "provider cancelled", false);
   return seq;
 }
 
@@ -286,6 +248,7 @@ async function waitForTool(
   call: NormalizedToolCall,
   signal: AbortSignal,
 ): Promise<ToolResultMessage> {
+  if (signal.aborted) throw new ProviderError("CANCELLED", "run cancelled before tool request", false);
   const callId = randomUUID();
   const effect = displayEffectForTool(call.tool);
   state(sessionId, runId, "executing");
@@ -330,13 +293,27 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
     maxPromptChars: Math.min(64 * 1024, provider.capabilities.context_chars),
     maxOutputChars: Math.min(256 * 1024, provider.capabilities.max_output_chars),
   });
-  runs.set(request.run_id, { controller, sessionId: request.session_id });
+  const run = { controller, sessionId: request.session_id, completedEffects: 0 };
+  runs.set(request.run_id, run);
   state(request.session_id, request.run_id, "thinking");
   let seq = 0;
   let content = "";
   let timeout: NodeJS.Timeout | undefined;
+  let liveness: NodeJS.Timeout | undefined;
   try {
     timeout = setTimeout(() => controller.abort("RUN_TIMEOUT"), budget.maxDurationMs);
+    liveness = setInterval(() => {
+      if (!controller.signal.aborted && runs.has(request.run_id)) {
+        send({
+          type: "heartbeat",
+          request_id: `run-liveness:${request.run_id}`,
+          runtime: process.version,
+          healthy: true,
+        });
+      }
+    }, RUN_LIVENESS_INTERVAL_MS);
+    // A liveness timer must not keep a shutting-down core process alive.
+    liveness.unref();
     const conversation: ConversationEntry[] = [
       { message: { role: "system", content: MODEL_DECISION_PROMPT }, required: true },
       ...(request.context ?? []).map((message) => contextEntry(message.role, message.content, message.effect)),
@@ -344,8 +321,10 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
     ];
     let providerOutputCharacters = 0;
     let round = 0;
+    let invalidDecisionRetries = 0;
 
     while (true) {
+      if (controller.signal.aborted) throw new ProviderError("CANCELLED", "run cancelled", false);
       budget.checkTime();
       round += 1;
       const messages = compactConversation(conversation, budget.maxPromptChars).map((message) => ({
@@ -358,7 +337,19 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
       providerOutputCharacters = response.characters;
       const decision = parseModelDecision(response.raw);
       if (!decision) {
-        throw new ProviderError("INVALID_MODEL_DECISION", "model did not return a valid JSON decision", false);
+        if (invalidDecisionRetries < MAX_INVALID_MODEL_DECISION_RETRIES) {
+          invalidDecisionRetries += 1;
+          conversation.push({
+            message: { role: "system", content: MODEL_DECISION_REPAIR_PROMPT },
+            required: true,
+          });
+          continue;
+        }
+        throw new ProviderError(
+          "INVALID_MODEL_DECISION",
+          "provider model did not return a valid JSON decision after a correction retry",
+          false,
+        );
       }
 
       if (decision.type === "final") {
@@ -412,7 +403,7 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
     } else if (controller.signal.reason === "RUN_TIMEOUT") {
       send({ type: "run.failed", session_id: request.session_id, run_id: request.run_id, error_code: "RUN_TIMEOUT", error: "run exceeded its time budget", retryable: false });
     } else if (controller.signal.aborted || (error instanceof ProviderError && error.code === "CANCELLED")) {
-      send({ type: "run.cancelled", session_id: request.session_id, run_id: request.run_id, reason: "cancelled by user", completed_effects: 0 });
+      send({ type: "run.cancelled", session_id: request.session_id, run_id: request.run_id, reason: "cancelled by user", completed_effects: run.completedEffects });
     } else if (error instanceof ProviderError) {
       send({ type: "run.failed", session_id: request.session_id, run_id: request.run_id, error_code: error.code, error: error.message, retryable: error.retryable });
     } else {
@@ -427,12 +418,34 @@ async function runTurn(request: Extract<IpcRequest, { type: "turn.start" }>): Pr
     }
   } finally {
     if (timeout) clearTimeout(timeout);
+    if (liveness) clearInterval(liveness);
     runs.delete(request.run_id);
   }
 }
 
+let initialized = false;
+let closing = false;
+
+function shutdown(): void {
+  if (closing) return;
+  closing = true;
+  for (const { controller } of runs.values()) controller.abort();
+  process.stdin.destroy();
+  process.exitCode ??= 0;
+}
+
 function handle(message: IpcMessage): void {
+  if (closing) return;
+  if (message.type === "shutdown") {
+    shutdown();
+    return;
+  }
   if (message.type === "initialize") {
+    if (message.protocol !== undefined && message.protocol !== PROTOCOL_VERSION) {
+      throw new ProtocolError("VERSION_MISMATCH", "protocol version is incompatible");
+    }
+    if (initialized) throw new ProtocolError("ALREADY_INITIALIZED", "core is already initialized");
+    initialized = true;
     send({
       type: "initialized",
       protocol: PROTOCOL_VERSION,
@@ -449,6 +462,8 @@ function handle(message: IpcMessage): void {
         ...(provider.model_ref ? [`model:${provider.model_ref}`] : []),
       ],
     });
+  } else if (!initialized) {
+    throw new ProtocolError("NOT_INITIALIZED", "initialize must succeed before other requests");
   } else if (message.type === "session.open") {
     sessions.add(message.session_id);
     send({ type: "session.opened", request_id: message.request_id, session_id: message.session_id });
@@ -469,27 +484,72 @@ function handle(message: IpcMessage): void {
   } else if (message.type === "tool.result") {
     const callId = message.call_id;
     const pending = callId ? pendingTools.get(callId) : undefined;
-    if (pending && pending.runId === message.run_id && pending.tool === message.tool) {
+    const run = pending ? runs.get(pending.runId) : undefined;
+    if (pending && run && pending.runId === message.run_id && pending.tool === message.tool
+      && (message.session_id == null || message.session_id === run.sessionId)) {
+      // Count at receipt, before resolving the waiter: a cancel in the same
+      // stdin chunk must not erase a broker-confirmed effect. Unknown outcomes
+      // and read-only successes are not confirmed applied effects.
+      if (message.side_effect === "applied") run.completedEffects += 1;
       pending.resolve(message);
     } else if (callId) {
       send({ type: "error", error_code: "TOOL_RESULT_MISMATCH", error: "tool result does not match a pending call", retryable: false });
     }
-  } else if (message.type === "shutdown") {
-    for (const { controller } of runs.values()) controller.abort();
-    process.exitCode = 0;
   }
 }
 
-const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-input.on("line", (line) => {
+// Decode only complete, bounded byte frames. readline's internal unfinished
+// line buffer is unbounded; discard an oversized frame until LF and recover.
+// CRLF and a final frame without LF retain the existing NDJSON contract.
+function receive(line: Buffer): void {
+  if (closing) return;
   try {
-    handle(parseMessage(line));
+    handle(parseMessage(line.toString("utf8").replace(/\r$/u, "")));
   } catch (error) {
     if (error instanceof ProtocolError) send({ type: "error", error_code: error.code, error: error.message, retryable: false });
     else log(error instanceof Error ? error.message : "unknown protocol failure");
   }
-});
+}
 
-input.on("close", () => {
-  for (const { controller } of runs.values()) controller.abort();
-});
+async function readInput(): Promise<void> {
+  let fragments: Buffer[] = [];
+  let bytes = 0;
+  let discarding = false;
+  try {
+    for await (const chunk of process.stdin) {
+      const data = chunk as Buffer;
+      let offset = 0;
+      while (offset < data.length && !closing) {
+        const newline = data.indexOf(10, offset);
+        const end = newline < 0 ? data.length : newline;
+        const part = data.subarray(offset, end);
+        if (!discarding) {
+          bytes += part.length;
+          // One optional CR is framing, not part of the JSON byte budget.
+          if (bytes > MAX_MESSAGE_BYTES + 1) {
+            discarding = true;
+            fragments = [];
+            send({ type: "error", error_code: "MESSAGE_TOO_LARGE", error: "message exceeds 1 MiB", retryable: false });
+          } else {
+            fragments.push(part);
+          }
+        }
+        if (newline >= 0) {
+          if (!discarding) receive(Buffer.concat(fragments, bytes));
+          fragments = [];
+          bytes = 0;
+          discarding = false;
+        }
+        offset = newline < 0 ? data.length : newline + 1;
+      }
+      if (closing) break;
+    }
+    if (!closing && !discarding && bytes > 0) receive(Buffer.concat(fragments, bytes));
+  } catch (error) {
+    if (!closing) log(error instanceof Error ? error.message : "stdin failed");
+  } finally {
+    shutdown();
+  }
+}
+
+void readInput();

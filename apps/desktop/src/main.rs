@@ -14,7 +14,7 @@ use ui_state::{ModelActivityMessage, ModelActivityRound, PresentationState, Wind
 use uuid::Uuid;
 use voice_capability::VoiceCapability;
 use vox_broker::{Broker, BrokerCall};
-use vox_secrets::SecretStore;
+use vox_secrets::{SecretError, SecretStore};
 use vox_session_store::{ApprovalRecord, EffectRecord, SessionStore};
 use vox_supervisor::{default_entry, default_node, AgentSupervisor};
 use vox_tool_runtime::RuntimeConfig;
@@ -33,6 +33,17 @@ fn provider_configuration_contains_secret(value: &str) -> bool {
 fn provider_configuration_is_safe(base_url: &str, model: &str) -> bool {
     !provider_configuration_contains_secret(base_url)
         && !provider_configuration_contains_secret(model)
+}
+
+fn provider_keyring_error_message(error: &SecretError) -> String {
+    match error {
+        SecretError::NativeToolMissing => concat!(
+            "A chave não foi gravada: o keyring do Linux precisa de secret-tool. ",
+            "Instale libsecret-tools (sudo apt install libsecret-tools), reabra o Vox e tente novamente."
+        )
+        .into(),
+        _ => format!("A chave não foi gravada no keyring: {error}"),
+    }
 }
 
 fn provider_keyring_environment(
@@ -82,6 +93,9 @@ const THEME_PREFERENCE: &str = "theme_preference";
 const LEGACY_DARK_THEME_PREFERENCE: &str = "dark_theme";
 const LAST_ACTIVE_SESSION_PREFERENCE: &str = "last_active_session_id";
 const DRAFT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(600);
+/// A lease older than this is orphaned (crashed desktop) and may be taken
+/// over. It also bounds how long a losing second instance stays blocked.
+const DESKTOP_LEASE_STALE_AFTER: Duration = Duration::from_secs(30);
 // A turn can legitimately spend more than a few seconds waiting for a remote
 // provider.  Core liveness is therefore based on the heartbeat/activity
 // channel, rather than on the age of the original turn.start request.
@@ -406,94 +420,16 @@ fn runtime_config_for_roots(allowed_roots: Vec<PathBuf>) -> RuntimeConfig {
     }
 }
 
-/// Defense in depth for content displayed by the transparency UI. The core is
-/// responsible for redacting every provider request, but the desktop repeats
-/// the small set of common credential patterns before rendering an IPC event.
-fn redact_activity_text(value: &str) -> String {
-    let mut redacted = value.to_owned();
-    for marker in [
-        "Bearer ",
-        "sk-",
-        "api_key=",
-        "api-key=",
-        "access_token=",
-        "token=",
-        "secret=",
-        "password=",
-        "senha=",
-        "segredo=",
-        "chave=",
-        "credencial=",
-        "api_key:",
-        "api-key:",
-        "access_token:",
-        "token:",
-        "secret:",
-        "password:",
-        "senha:",
-        "segredo:",
-        "chave:",
-        "credencial:",
-        "\"api_key\":",
-        "\"api-key\":",
-        "\"access_token\":",
-        "\"token\":",
-        "\"secret\":",
-        "\"password\":",
-        "\"senha\":",
-        "\"segredo\":",
-        "\"chave\":",
-        "\"credencial\":",
-        "\"authorization\":",
-        "\"autorização\":",
-    ] {
-        let mut cursor = 0;
-        while let Some(relative) = find_ascii_case_insensitive(&redacted[cursor..], marker) {
-            let start = cursor + relative;
-            let mut value_start = start + marker.len();
-            while redacted
-                .as_bytes()
-                .get(value_start)
-                .is_some_and(u8::is_ascii_whitespace)
-            {
-                value_start += 1;
-            }
-            let quote = match redacted.as_bytes().get(value_start).copied() {
-                Some(byte @ (b'\'' | b'\"')) => Some(byte),
-                _ => None,
-            };
-            if quote.is_some() {
-                value_start += 1;
-            }
-            let end = redacted[value_start..]
-                .find(|character: char| {
-                    quote.map_or_else(
-                        || {
-                            character.is_whitespace()
-                                || matches!(character, '\'' | '\"' | ',' | '}')
-                        },
-                        |quote| character == quote as char,
-                    )
-                })
-                .map(|offset| value_start + offset)
-                .unwrap_or(redacted.len());
-            if value_start < end {
-                redacted.replace_range(value_start..end, "[REDACTED]");
-                cursor = value_start + "[REDACTED]".len();
-            } else {
-                cursor = value_start.saturating_add(1);
-            }
-        }
-    }
-    redacted
-}
+/// Storage and display use the same UTF-8-safe credential redactor.
+use vox_session_store::redact_sensitive as redact_activity_text;
 
-fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
-    let needle = needle.as_bytes();
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .position(|candidate| candidate.eq_ignore_ascii_case(needle))
+/// Missing storage, a missing owner, a failed write or a stolen lease all
+/// disable execution. Revalidate at each launch/dispatch, not just on a timer.
+fn renew_execution_lease(store: Option<&SessionStore>, owner: Option<&str>) -> bool {
+    match (store, owner) {
+        (Some(store), Some(owner)) => store.renew_desktop_lease(owner).unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn redacted_value_for_display(value: &Value) -> Value {
@@ -725,25 +661,10 @@ struct VoxApp {
 impl VoxApp {
     fn new() -> Self {
         let provisional_session_id = Uuid::new_v4().to_string();
-        let (store, mut storage_warning) = persistent_store();
         let lease_candidate = Uuid::new_v4().to_string();
-        let desktop_lease_owner = match store.as_ref() {
-            Some(store) => match store
-                .acquire_desktop_lease(&lease_candidate, Duration::from_secs(30))
-            {
-                Ok(true) => Some(lease_candidate),
-                Ok(false) => {
-                    storage_warning = Some("outra instância do Vox já controla o desktop".into());
-                    None
-                }
-                Err(error) => {
-                    storage_warning = Some(format!("lease do desktop indisponível: {error}"));
-                    None
-                }
-            },
-            None => None,
-        };
-        let can_start_core = store.is_none() || desktop_lease_owner.is_some();
+        let (store, mut storage_warning) = persistent_store(&lease_candidate);
+        let desktop_lease_owner = store.as_ref().map(|_| lease_candidate);
+        let can_start_core = renew_execution_lease(store.as_ref(), desktop_lease_owner.as_deref());
         let keep_on_top = store
             .as_ref()
             .and_then(|store| store.preference("keep_on_top").ok().flatten())
@@ -1047,6 +968,18 @@ impl VoxApp {
         }
     }
 
+    fn require_execution_storage(&mut self) -> bool {
+        if renew_execution_lease(self.store.as_ref(), self.desktop_lease_owner.as_deref()) {
+            return true;
+        }
+        self.desktop_lease_owner = None;
+        self.view.connected = false;
+        self.view.fail(
+            "execução bloqueada: o armazenamento local ou a posse exclusiva do desktop não está disponível",
+        );
+        false
+    }
+
     fn send(&mut self) {
         let content = self.view.draft.trim().to_owned();
         if content.is_empty()
@@ -1059,49 +992,42 @@ impl VoxApp {
             self.view.status = "aguardando a interrupção da ação anterior".into();
             return;
         }
+        if !self.require_execution_storage() {
+            return;
+        }
         let Some(supervisor) = self.supervisor.as_ref() else {
             return;
         };
-        let run_id = Uuid::new_v4().to_string();
-        self.view
-            .submit(redact_activity_text(&content), run_id.clone());
-        // The current user message is appended after the lookup and excluded
-        // by sequence, so the provider receives prior conversation once plus
-        // the current request once. SessionStore returns only persisted,
-        // redacted roles suitable for the model boundary.
-        let stored_sequence = self.store.as_ref().and_then(|store| {
+        let prepared = self.store.as_ref().and_then(|store| {
             store
-                .next_message_sequence(&self.session_id)
+                .prepare_turn(
+                    self.desktop_lease_owner.as_deref()?,
+                    &self.session_id,
+                    Some(&self.view.model_label),
+                    &content,
+                )
                 .map_err(|error| {
-                    self.storage_warning = Some(format!(
-                        "não foi possível preparar o histórico local para esta tarefa: {error}"
-                    ));
+                    self.storage_warning =
+                        Some(format!("não foi possível preparar esta tarefa: {error}"));
                 })
                 .ok()
         });
-        let current_sequence = stored_sequence.unwrap_or(self.view.messages.len() as i64);
-        let context_lookup = self
-            .store
-            .as_ref()
-            .map(|store| store.model_context_before(&self.session_id, current_sequence, 100));
-        let context = match context_lookup {
-            Some(Ok(messages)) => messages
-                .into_iter()
-                .map(|message| {
-                    serde_json::json!({
-                        "role": message.role,
-                        "content": message.content,
-                    })
-                })
-                .collect(),
-            Some(Err(error)) => {
-                self.storage_warning = Some(format!(
-                    "histórico local indisponível para esta tarefa: {error}"
-                ));
-                Vec::new()
-            }
-            None => Vec::new(),
+        let Some((run, messages)) = prepared else {
+            // Durable preparation failed (storage gone, lease lost or the
+            // session already has a run): nothing was committed and nothing
+            // may be sent to the core.
+            self.view.fail("tarefa não enviada; o histórico local não confirmou esta conversa");
+            return;
         };
+        // The journal, UI and IPC share this ID. Nothing leaves the process
+        // until both the user message and run have committed successfully.
+        let run_id = run.id;
+        self.active_store_run = Some(run_id.clone());
+        self.view.submit(redact_activity_text(&content), run_id.clone());
+        let context: Vec<Value> = messages
+            .into_iter()
+            .map(|message| serde_json::json!({ "role": message.role, "content": message.content }))
+            .collect();
         if let Err(error) = supervisor.start_turn_with_context(
             &Uuid::new_v4().to_string(),
             &self.session_id,
@@ -1114,25 +1040,6 @@ impl VoxApp {
             self.view
                 .fail(redact_activity_text(&format!("falha ao enviar: {error}")));
             return;
-        }
-        if let Some(store) = self.store.as_ref() {
-            match store.start_run(&self.session_id, Some(&self.view.model_label)) {
-                Ok(run) => self.active_store_run = Some(run.id),
-                Err(error) => {
-                    self.storage_warning = Some(format!(
-                        "não foi possível registrar esta tarefa no histórico local: {error}"
-                    ));
-                }
-            }
-            if stored_sequence.is_some() {
-                if let Err(error) =
-                    store.append_message(&self.session_id, "user", &content, current_sequence)
-                {
-                    self.storage_warning = Some(format!(
-                        "não foi possível registrar a mensagem no histórico local: {error}"
-                    ));
-                }
-            }
         }
         self.view.draft.clear();
         self.clear_persisted_draft();
@@ -1362,7 +1269,7 @@ impl VoxApp {
                 });
             }
             Err(error) => {
-                self.provider_keyring_status = Some(format!("Não foi possível salvar: {error}"));
+                self.provider_keyring_status = Some(provider_keyring_error_message(&error));
             }
         }
     }
@@ -1851,6 +1758,12 @@ impl VoxApp {
     }
 
     fn restart_core_after_failure(&mut self) {
+        // Fail closed: without the lease or the store there is no safe
+        // restart path, and effects must stay unknown instead of replaying.
+        if !self.require_execution_storage() {
+            self.finish_store_run("interrupted");
+            return;
+        }
         if let Some(run_id) = self.view.active_run.clone() {
             self.cancel_broker_execution_for(&run_id);
         }
@@ -2340,7 +2253,7 @@ impl VoxApp {
     }
 }
 
-fn persistent_store() -> (Option<SessionStore>, Option<String>) {
+fn persistent_store(owner_id: &str) -> (Option<SessionStore>, Option<String>) {
     let directory = std::env::var_os("VOX_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -2378,8 +2291,16 @@ fn persistent_store() -> (Option<SessionStore>, Option<String>) {
             )),
         );
     }
-    match SessionStore::open(directory.join("sessions.sqlite")) {
+    match SessionStore::open_for_desktop(
+        directory.join("sessions.sqlite"),
+        owner_id,
+        DESKTOP_LEASE_STALE_AFTER,
+    ) {
         Ok(store) => (Some(store), None),
+        Err(vox_session_store::StoreError::LeaseNotOwned) => (
+            None,
+            Some("outra instância do Vox já controla o desktop".into()),
+        ),
         Err(error) => (None, Some(format!("histórico local indisponível: {error}"))),
     }
 }
@@ -2408,10 +2329,10 @@ impl eframe::App for VoxApp {
             self.window_level_applied = true;
         }
         if self.last_lease_renewed.elapsed() >= Duration::from_secs(5) {
-            let lease_ok = match (self.store.as_ref(), self.desktop_lease_owner.as_deref()) {
-                (Some(store), Some(owner)) => store.renew_desktop_lease(owner).unwrap_or(false),
-                _ => true,
-            };
+            let lease_ok = renew_execution_lease(
+                self.store.as_ref(),
+                self.desktop_lease_owner.as_deref(),
+            );
             self.last_lease_renewed = Instant::now();
             if !lease_ok {
                 if self.view.active_run.is_some() {
@@ -3243,6 +3164,14 @@ mod tests {
         let environment = provider_core_environment("https://provider.example/v1", provider_key);
         assert!(environment.contains(&("VOX_PROVIDER".into(), "fake".into())));
         assert!(environment.contains(&("VOX_PROVIDER_API_KEY".into(), String::new())));
+    }
+
+    #[test]
+    fn missing_linux_keyring_shows_an_installation_action() {
+        let message = provider_keyring_error_message(&SecretError::NativeToolMissing);
+        assert!(message.contains("libsecret-tools"));
+        assert!(message.contains("não foi gravada"));
+        assert!(!message.contains("chave de teste"));
     }
 
     #[test]

@@ -4,6 +4,38 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { MAX_MESSAGE_BYTES, ProtocolError, encodeMessage, parseMessage } from "../src/index.js";
+import { ipcSchema } from "../src/ipc-schema.js";
+
+const root = fileURLToPath(new URL("../../../", import.meta.url));
+const cases = JSON.parse(readFileSync(resolve(root, "tests/contracts/boundary-cases.json"), "utf8")) as {
+  name: string; expect: "valid" | "invalid"; message?: unknown; line?: string;
+}[];
+function expand(value: any): any {
+  if (value && typeof value === "object" && "$repeat" in value) return value.$repeat.repeat(value.count);
+  if (Array.isArray(value)) return value.map(expand);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expand(item)]));
+  return value;
+}
+for (const fixture of cases) {
+  test(`shared boundary: ${fixture.name}`, () => {
+    const message = expand(fixture.message);
+    const line = fixture.line ?? JSON.stringify(message);
+    if (fixture.expect === "valid") assert.doesNotThrow(() => parseMessage(line));
+    else assert.throws(() => parseMessage(line), ProtocolError);
+  });
+}
+
+test("bundled schema exactly matches canonical schema and uses supported keywords", () => {
+  assert.deepEqual(ipcSchema, JSON.parse(readFileSync(resolve(root, "schemas/ipc.schema.json"), "utf8")));
+  const supported = new Set(["type", "const", "enum", "minLength", "maxLength", "x-maxUtf8Bytes", "minimum", "maximum", "required", "properties", "items", "minItems", "maxItems", "additionalProperties"]);
+  function check(rule: Record<string, unknown>): void {
+    for (const key of Object.keys(rule)) assert.ok(supported.has(key), `unsupported keyword ${key}`);
+    if ("additionalProperties" in rule) assert.equal(rule.additionalProperties, true);
+    for (const child of Object.values(rule.properties ?? {})) check(child as Record<string, unknown>);
+    if (rule.items) check(rule.items as Record<string, unknown>);
+  }
+  for (const rule of Object.values(ipcSchema.$defs)) check(rule);
+});
 
 const contract = (name: string, overrides: Record<string, unknown> = {}): string => {
   const value = JSON.parse(
