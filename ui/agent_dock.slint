@@ -1,0 +1,88 @@
+import { Button, TextEdit } from "std-widgets.slint";
+
+export component AgentDock inherits Window {
+    title: "vocs";
+    no-frame: true;
+    background: transparent;
+    preferred-width: 420px;
+    preferred-height: composer-open ? 160px : 56px;
+    min-width: 420px;
+    max-width: 420px;
+    min-height: 56px;
+    max-height: 160px;
+
+    in property <bool> composer-open: false;
+    in property <string> status-text: "Ready";
+    in property <bool> working: false;
+    in-out property <string> composer-text: "";
+    callback submit(string);
+    callback close-composer();
+    callback chat();
+    callback voice();
+
+    Rectangle {
+        background: transparent;
+        animate preferred-height { duration: 300ms; easing: ease-out; }
+
+        WindowMoveArea {
+            x: 0; y: 0; width: parent.width; height: parent.height;
+            Rectangle {
+                background: #0a0a0a;
+                border-radius: 16px;
+                clip: true;
+
+                if composer-open: Rectangle {
+                    x: 0; y: 0; width: parent.width; height: 120px;
+                    background: #0a0a0a;
+                    TextEdit {
+                        x: 8px; y: 8px; width: parent.width - 44px; height: 108px;
+                        text <=> composer-text;
+                        placeholder-text: "Type something here...";
+                        font-size: 14px;
+                        wrap: word-wrap;
+                        key-pressed(event) => {
+                            if (event.text == Key.Return && !event.modifiers.shift) {
+                                submit(self.text);
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                    Button {
+                        x: parent.width - 32px; y: 5px; width: 24px; height: 24px;
+                        text: "×";
+                        clicked => { close-composer(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    y: composer-open ? 120px : 0px;
+                    height: 40px;
+                    spacing: 12px;
+                    Rectangle {
+                        width: 36px; height: 36px; border-radius: 12px;
+                        background: #292929;
+                        Text { text: "V"; color: white; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    VerticalLayout {
+                        min-width: 0px;
+                        Text { text: "vocs"; color: white; font-size: 14px; font-weight: 600; }
+                        Text { text: status-text; color: #a3a3a3; font-size: 12px; }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 6px;
+                        Button { text: "♩  Voice  V"; clicked => { voice(); } }
+                        Button {
+                            text: composer-open ? "➤  Send  C" : "☵  Chat  C";
+                            clicked => {
+                                if (composer-open) { submit(composer-text); } else { chat(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}

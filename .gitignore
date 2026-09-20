@@ -1,22 +1,31 @@
-# Clones de auditoria local; a proveniência é reproduzida pelos manifestos versionados.
-upstream/pi/
-upstream/xa11y/
+# Rust build output
+/target/
 
-# Saídas locais de builds, testes e ferramentas.
-target/
-node_modules/
-dist/
-coverage/
-.artifacts/
-.runtime-data/
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
 
-# TypeScript compiler output kept beside source files in the dev workspace.
+# Local runtime/debug artifacts
+/runs/
+/debug_point.png
+
+# JavaScript/package manager output from the previous prototype
+/node_modules/
+/dist/
+/coverage/
+/.artifacts/
+/.runtime-data/
 packages/*/src/*.js
 packages/*/src/*.js.map
 packages/*/src/*.d.ts
 packages/*/src/*.d.ts.map
 
-# Credenciais e configurações locais.
+# Local clones and generated data
+/upstream/
+
+# Credentials and local configuration
 .env
 .env.*
 !.env.example

@@ -1,34 +1,28 @@
-[workspace]
-resolver = "2"
-members = [
-    "apps/desktop",
-    "crates/protocol",
-    "crates/policy",
-    "crates/broker",
-    "crates/tool-runtime",
-    "crates/desktop-access",
-    "crates/session-store",
-    "crates/secrets",
-    "crates/supervisor",
-    "crates/audio-capture",
-]
-
-[workspace.package]
+[package]
+name = "vocs"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.95"
-license = "MIT OR Apache-2.0"
+edition = "2024"
+build = "build.rs"
 
-[workspace.dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-thiserror = "2.0.20"
-uuid = { version = "1.23.0", features = ["v4", "serde"] }
-sha2 = "0.10.9"
-hex = "0.4.3"
-crossbeam-channel = "0.5.15"
-libc = "0.2.176"
-rusqlite = { version = "0.37.0", features = ["backup", "bundled"] }
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
-egui = "0.36.2"
-xa11y = { version = "0.14.0", default-features = false }
+[dependencies]
+anyhow = "1"
+ashpd = { version = "0.13.13", features = ["remote_desktop", "screencast"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+enumflags2 = "0.7"
+image = { version = "0.25", default-features = false, features = ["png"] }
+pipewire = "0.10.1"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-18", "backend-winit-wayland", "renderer-software"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+slint-build = "1.18"
