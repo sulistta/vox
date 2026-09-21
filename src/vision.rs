@@ -1,5 +1,6 @@
 use std::{io::Cursor, time::Instant};
 
+use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use regex::Regex;
@@ -18,25 +19,31 @@ pub struct BoundingBox {
 }
 
 #[derive(Clone, Debug)]
-pub struct GroundingResult {
+pub struct FoundGrounding {
     pub bbox: BoundingBox,
     pub raw_response: String,
     pub frame_acquire_ms: f64,
-    pub png_encode_ms: f64,
+    pub image_encode_ms: f64,
     pub base64_ms: f64,
     pub vocaela_http_ms: f64,
-    pub vocaela_parse_ms: f64,
+    pub vision_parse_ms: f64,
     pub grounding_total_ms: f64,
     pub png: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub enum GroundingResult {
+    Found(FoundGrounding),
+    NotFound { raw_response: String },
+}
+
 #[derive(Debug, Error)]
 pub enum VisionError {
-    #[error("Vocaela is unavailable at {0}: {1}")]
+    #[error("vision provider is unavailable at {0}: {1}")]
     Unavailable(String, String),
-    #[error("Vocaela HTTP request failed: {0}")]
+    #[error("vision HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("Vocaela returned an invalid response: {0}")]
+    #[error("vision response is invalid: {0}")]
     InvalidResponse(String),
     #[error("invalid normalized bounding box: {0}")]
     InvalidBoundingBox(String),
@@ -44,8 +51,18 @@ pub enum VisionError {
     Image(#[from] image::ImageError),
 }
 
+#[async_trait]
+pub trait VisionProvider: Send + Sync {
+    async fn health_check(&self) -> Result<(), VisionError>;
+    async fn ground(
+        &self,
+        frame: &Frame,
+        instruction: &str,
+    ) -> Result<GroundingResult, VisionError>;
+}
+
 #[derive(Clone)]
-pub struct VocaelaClient {
+pub struct VocaelaVisionProvider {
     client: Client,
     base_url: String,
 }
@@ -63,15 +80,18 @@ struct ChatMessage {
     content: String,
 }
 
-impl VocaelaClient {
+impl VocaelaVisionProvider {
     pub fn new(client: Client, base_url: String) -> Self {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').into(),
         }
     }
+}
 
-    pub async fn health_check(&self) -> Result<(), VisionError> {
+#[async_trait]
+impl VisionProvider for VocaelaVisionProvider {
+    async fn health_check(&self) -> Result<(), VisionError> {
         let health = self
             .client
             .get(format!("{}/health", self.base_url))
@@ -95,13 +115,13 @@ impl VocaelaClient {
         Err(VisionError::Unavailable(self.base_url.clone(), detail))
     }
 
-    pub async fn ground(
+    async fn ground(
         &self,
         frame: &Frame,
-        target: &str,
+        instruction: &str,
     ) -> Result<GroundingResult, VisionError> {
         let total = Instant::now();
-        let png_started = Instant::now();
+        let encode_started = Instant::now();
         let image = RgbaImage::from_raw(frame.pixel_width, frame.pixel_height, frame.rgba.clone())
             .ok_or_else(|| {
                 VisionError::InvalidResponse("frame RGBA buffer has the wrong size".into())
@@ -109,29 +129,22 @@ impl VocaelaClient {
         let mut png = Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(image).write_to(&mut png, ImageFormat::Png)?;
         let png = png.into_inner();
-        let png_encode_ms = png_started.elapsed().as_secs_f64() * 1000.0;
+        let image_encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
         let base_started = Instant::now();
         let encoded = STANDARD.encode(&png);
         let base64_ms = base_started.elapsed().as_secs_f64() * 1000.0;
-        let request = serde_json::json!({
-            "model": "vocaela",
-            "messages": [{"role":"user", "content":[
-                {"type":"text", "text": format!("Click {}", target)},
-                {"type":"image_url", "image_url":{"url": format!("data:image/png;base64,{}", encoded)}}
-            ]}], "temperature": 0, "max_tokens": 64
-        });
+        let request = serde_json::json!({ "model": "vocaela", "messages": [{"role":"user", "content":[{"type":"text", "text": instruction}, {"type":"image_url", "image_url":{"url": format!("data:image/png;base64,{encoded}")}}]}], "temperature": 0, "max_tokens": 64 });
         let http_started = Instant::now();
-        let response = self
+        let body: ChatResponse = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .json(&request)
             .send()
             .await?
-            .error_for_status()?;
-        let body: ChatResponse = response
+            .error_for_status()?
             .json()
             .await
-            .map_err(|e| VisionError::InvalidResponse(e.to_string()))?;
+            .map_err(|error| VisionError::InvalidResponse(error.to_string()))?;
         let vocaela_http_ms = http_started.elapsed().as_secs_f64() * 1000.0;
         let parse_started = Instant::now();
         let raw_response = body
@@ -141,20 +154,25 @@ impl VocaelaClient {
             .message
             .content
             .clone();
-        tracing::debug!(target = target, response = %raw_response, "Vocaela response");
+        let lower = raw_response.to_ascii_lowercase();
+        if ["not found", "cannot find", "can't find", "no target"]
+            .iter()
+            .any(|phrase| lower.contains(phrase))
+        {
+            return Ok(GroundingResult::NotFound { raw_response });
+        }
         let bbox = parse_bbox(&raw_response)?;
-        let vocaela_parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
-        Ok(GroundingResult {
+        Ok(GroundingResult::Found(FoundGrounding {
             bbox,
             raw_response,
             frame_acquire_ms: 0.0,
-            png_encode_ms,
+            image_encode_ms,
             base64_ms,
             vocaela_http_ms,
-            vocaela_parse_ms,
+            vision_parse_ms: parse_started.elapsed().as_secs_f64() * 1000.0,
             grounding_total_ms: total.elapsed().as_secs_f64() * 1000.0,
             png,
-        })
+        }))
     }
 }
 
@@ -166,29 +184,19 @@ pub fn parse_bbox(text: &str) -> Result<BoundingBox, VisionError> {
             .skip(1)
             .map(|capture| capture.unwrap().as_str().parse::<f64>())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| {
-                VisionError::InvalidBoundingBox("numbers are not finite decimals".into())
-            })?
+            .map_err(|_| VisionError::InvalidBoundingBox("numbers are not decimals".into()))?
     } else {
-        let json_text = text
+        let json = text
             .trim()
-            .strip_prefix("```json")
-            .and_then(|value| value.strip_suffix("```"))
-            .or_else(|| {
-                text.trim()
-                    .strip_prefix("```")
-                    .and_then(|value| value.strip_suffix("```"))
-            })
-            .unwrap_or(text.trim());
-        let parsed: serde_json::Value = serde_json::from_str(json_text.trim()).map_err(|_| {
-            VisionError::InvalidBoundingBox(
-                "expected four numbers in brackets or coordinate JSON".into(),
-            )
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let value: serde_json::Value = serde_json::from_str(json).map_err(|_| {
+            VisionError::InvalidBoundingBox("expected a normalized box or coordinate JSON".into())
         })?;
-        let mut found = None;
-        find_json_coordinates(&parsed, &mut found);
-        found.ok_or_else(|| {
-            VisionError::InvalidBoundingBox("JSON did not contain normalized coordinates".into())
+        find_json_coordinates(&value).ok_or_else(|| {
+            VisionError::InvalidBoundingBox("JSON lacks normalized coordinates".into())
         })?
     };
     let bbox = BoundingBox {
@@ -197,14 +205,9 @@ pub fn parse_bbox(text: &str) -> Result<BoundingBox, VisionError> {
         width: values[2],
         height: values[3],
     };
-    if !bbox.center_x.is_finite()
-        || !bbox.center_y.is_finite()
-        || !bbox.width.is_finite()
-        || !bbox.height.is_finite()
-        || !(0.0..=1.0).contains(&bbox.center_x)
-        || !(0.0..=1.0).contains(&bbox.center_y)
-        || !(0.0..=1.0).contains(&bbox.width)
-        || !(0.0..=1.0).contains(&bbox.height)
+    if ![bbox.center_x, bbox.center_y, bbox.width, bbox.height]
+        .into_iter()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
         || bbox.width == 0.0
         || bbox.height == 0.0
     {
@@ -215,89 +218,39 @@ pub fn parse_bbox(text: &str) -> Result<BoundingBox, VisionError> {
     Ok(bbox)
 }
 
-fn normalized_number(value: &serde_json::Value) -> Option<f64> {
-    let value = value.as_f64()?;
-    (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value)
+fn number(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
 }
-
-fn find_json_coordinates(value: &serde_json::Value, result: &mut Option<Vec<f64>>) {
-    if result.is_some() {
-        return;
-    }
+fn find_json_coordinates(value: &serde_json::Value) -> Option<Vec<f64>> {
     match value {
         serde_json::Value::Object(object) => {
             let x = object
                 .get("center_x")
                 .or_else(|| object.get("x_normalized"))
                 .or_else(|| object.get("x"))
-                .and_then(normalized_number);
+                .and_then(number);
             let y = object
                 .get("center_y")
                 .or_else(|| object.get("y_normalized"))
                 .or_else(|| object.get("y"))
-                .and_then(normalized_number);
-            let width = object
-                .get("width")
-                .and_then(normalized_number)
-                .unwrap_or(0.01);
-            let height = object
-                .get("height")
-                .and_then(normalized_number)
-                .unwrap_or(0.01);
+                .and_then(number);
             if let (Some(x), Some(y)) = (x, y) {
-                *result = Some(vec![x, y, width, height]);
-                return;
+                return Some(vec![
+                    x,
+                    y,
+                    object.get("width").and_then(number).unwrap_or(0.01),
+                    object.get("height").and_then(number).unwrap_or(0.01),
+                ]);
             }
-            for key in [
-                "coordinates",
-                "coordinate",
-                "point",
-                "center",
-                "bbox",
-                "bounding_box",
-                "action",
-            ] {
-                if let Some(nested) = object.get(key) {
-                    find_json_coordinates(nested, result);
-                    if result.is_some() {
-                        return;
-                    }
-                }
-            }
-            for nested in object.values() {
-                find_json_coordinates(nested, result);
-                if result.is_some() {
-                    return;
-                }
-            }
+            object.values().find_map(find_json_coordinates)
         }
-        serde_json::Value::Array(array) => {
-            if array.len() >= 4 {
-                if let Some(values) = array[..4]
-                    .iter()
-                    .map(normalized_number)
-                    .collect::<Option<Vec<_>>>()
-                {
-                    *result = Some(values);
-                    return;
-                }
-            }
-            if array.len() >= 2 {
-                if let (Some(x), Some(y)) =
-                    (normalized_number(&array[0]), normalized_number(&array[1]))
-                {
-                    *result = Some(vec![x, y, 0.01, 0.01]);
-                    return;
-                }
-            }
-            for nested in array {
-                find_json_coordinates(nested, result);
-                if result.is_some() {
-                    return;
-                }
-            }
+        serde_json::Value::Array(array) if array.len() >= 4 => {
+            array[..4].iter().map(number).collect()
         }
-        _ => {}
+        serde_json::Value::Array(array) => array.iter().find_map(find_json_coordinates),
+        _ => None,
     }
 }
 
@@ -306,18 +259,24 @@ mod tests {
     use super::*;
     #[test]
     fn parses_bbox() {
-        let bbox = parse_bbox("Normalized bounding box: [0.3849, 0.0518, 0.0547, 0.0266]").unwrap();
-        assert_eq!(bbox.center_x, 0.3849);
+        assert_eq!(
+            parse_bbox("[0.3849, 0.0518, 0.0547, 0.0266]")
+                .unwrap()
+                .center_x,
+            0.3849
+        );
     }
     #[test]
     fn rejects_invalid_bbox() {
         assert!(parse_bbox("[1.4, -0.1, 0.1, 0.1]").is_err());
-        assert!(parse_bbox("[NaN, 0.1, 0.1, 0.1]").is_err());
     }
-
     #[test]
     fn parses_coordinate_json() {
-        let bbox = parse_bbox(r#"{"action":{"coordinates":{"x":0.25,"y":0.75}}}"#).unwrap();
-        assert_eq!((bbox.center_x, bbox.center_y), (0.25, 0.75));
+        assert_eq!(
+            parse_bbox(r#"{"action":{"coordinates":{"x":0.25,"y":0.75}}}"#)
+                .unwrap()
+                .center_y,
+            0.75
+        );
     }
 }

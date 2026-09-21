@@ -1,83 +1,134 @@
-# vocs — Jev + Vocaela nativos no Wayland
+# Vox / vocs
 
-Este diretório contém o protótipo Python original (mantido como referência) e o
-novo crate Rust. O binário Rust mantém uma sessão persistente
-`RemoteDesktop + ScreenCast + PipeWire`, captura o último frame em memória,
-consulta Vocaela para grounding e deixa Jev escolher uma ação de um conjunto
-fechado por skill. Não há OCR, AT-SPI, EIS/libei, DOM ou áudio.
+Vox is a native Rust experiment for Wayland computer use. It keeps one XDG
+RemoteDesktop + ScreenCast + PipeWire session while a task runs, asks Jev for
+one bounded decision at a time, uses a configurable text provider only when
+new language is needed, uses Vocaela only to ground a visual instruction, and
+uses the portal for input.
 
-## Dependências
+## Architecture
 
-Além de Rust/Cargo, instale as bibliotecas usadas pelo build:
-
-```bash
-sudo apt install clang libclang-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libdbus-1-dev
+```
+Rust controller → Jev decision → policy → portal side effect
+      │                │              │
+      │                └ closed-set capability and arguments
+      ├ artifacts ↔ TextProvider (only after RequestText)
+      └ fresh frame ↔ VisionProvider (only before VisualAction)
 ```
 
-O portal precisa de um backend Wayland com `RemoteDesktop` e `ScreenCast`, e o
-servidor PipeWire deve estar ativo. `clang`/`libclang-dev` são usados pelo
-`bindgen` para gerar os bindings do PipeWire durante a compilação.
+Rust owns the state machine and all side effects. Jev selects one capability
+and closed-set arguments; it receives no pixels and writes no free text.
+`OpenAiCompatibleTextProvider` writes only a requested text artifact. The
+current `VocaelaVisionProvider` receives an in-memory frame plus one concise
+visual instruction and returns `Found(bbox)` or `NotFound`.
 
-Configure apenas a chave do Jev (não é gravada nem aparece nos logs):
+The controller state contains the original goal artifact, a bounded recent
+history, current artifacts, last execution result, capability availability,
+desktop state, and an OS-provided application catalog. Site and application
+names are runtime data; there are no application-specific skills or routes.
+
+## Architecture invariants
+
+1. Rust owns control flow.
+2. Jev selects; it does not generate free text.
+3. TextProvider generates text; it does not choose actions.
+4. VisionProvider sees; it does not own high-level intent.
+5. Side effects pass through PolicyEngine.
+6. Invalid grounding never causes a click.
+7. Application/site names are data, not code paths.
+8. There is no simple/complex task classifier.
+9. Screenshots stay local by default.
+10. User-facing configuration happens in the UI.
+
+## Settings and secrets
+
+Click the Vox avatar to open Settings. It stores Jev and text-provider URLs and
+model identifiers in `XDG_CONFIG_HOME/vocs/settings.json` (normally
+`~/.config/vocs/settings.json`). API keys are written to the Linux Secret
+Service under `vocs/typesafe_api_key` and `vocs/text_provider_api_key`; Slint
+never reads a saved key back into a text field. `.env` remains a development
+fallback for `TYPESAFE_API_KEY`, `TEXT_PROVIDER_API_KEY`, `VOCAELA_URL`,
+`MAX_STEPS`, and `ACTION_SETTLE_MS`.
+
+The text provider is a minimal OpenAI-compatible endpoint: it uses only
+`POST {base_url}/chat/completions`, `model`, `messages`, `temperature`, and
+`max_tokens`. Authentication is optional. It does not require tools, schemas,
+streaming, or model enumeration.
+
+## Development setup
 
 ```bash
-cp .env.example .env
-export TYPESAFE_API_KEY='...'
+sudo apt install clang libclang-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libdbus-1-dev libglib2.0-dev
+cargo run
 ```
 
-`VOCAELA_URL`, `TYPESAFE_BASE_URL`, `TYPESAFE_MODEL`, `JEV_MIN_CONFIDENCE`,
-`MAX_STEPS` e `ACTION_SETTLE_MS` podem ser alterados por ambiente. O Vocaela é
-iniciado externamente com `llama-server`; o Rust nunca reinicia nem incorpora o
-servidor.
-
-## Execução
-
-Sem `--image`, o binário usa captura live e pede autorização do portal uma vez:
+Without `--image`, Vox starts the live portal session and requests a monitor
+once. A goal can be submitted through the dock or provided for development:
 
 ```bash
-cargo run -- --goal "Search YouTube for rust programming"
-cargo run -- --goal "Search YouTube for rust programming" --execute
+cargo run -- --goal "Open an application and interact with a visible item"
+cargo run -- --goal "Open an application and interact with a visible item" --execute
+cargo run -- --goal "Click the visible button" --image screenshot.png
 ```
 
-`--execute` habilita os métodos D-Bus de input. Sem ele, grounding e debug são
-executados, mas as ações ficam `Simulated`. Coordenadas de um screenshot estático
-nunca podem ser usadas para input: `--image --execute` é rejeitado.
+`--execute` enables real portal input. It is deliberately rejected with
+`--image`. High and medium risk actions require an explicit “Allow once” in
+the dock. The Vocaela `llama-server` remains an external development runtime;
+future packaging belongs in `VisionRuntimeManager`, not in this controller.
 
-Para regressão offline do parser/grounding, use uma imagem estática (sem input):
+## Policy and verification
 
-```bash
-cargo run -- --goal "Search YouTube for rust programming" --image screenshot.png
-```
+Policy is Rust code. It takes the higher of the action baseline and Jev’s risk
+signal. It gates using the selected action's probability and its margin over the
+runner-up, not Jev's derived `confidence`: the latter changes meaning when the
+dynamic Choice set changes size. Defaults are 0.50 / 0.40 / 0.60 selected
+probability for low / medium / high risk, with a 0.04 minimum margin. Medium and
+high risk still always request confirmation. These are calibration inputs, not
+claims of semantic correctness.
 
-O modo live seleciona somente um monitor, mantém o stream PipeWire aberto e
-chama `capture_latest()` antes de cada consulta Vocaela. O overlay/debug usa
-dimensões em pixels; o pointer usa `logical_size` do stream quando disponível.
-Após cada input há uma espera configurável, por padrão 300 ms.
+Input delivery and semantic completion are distinct. Visual actions acquire a
+fresh frame, ground it, inject input, wait, acquire another frame, and record a
+cheap screen-delta result: `ScreenChanged`, `NoVisibleChange`, or `Unknown`.
+A changed screen is evidence only; it is not proof that the user’s goal was
+fulfilled.
 
-Janelas sobrepostas, inclusive o terminal que iniciou o programa, continuam
-fazendo parte da imagem capturada e podem ocultar o alvo completamente. O alvo
-precisa estar ao menos parcialmente visível; mover/minimizar o terminal é uma
-forma simples de evitar essa contaminação sem heurísticas específicas de app.
+Developer runs are written beneath `XDG_STATE_HOME/vocs/runs/<run-id>/` by
+default. They include visual frames/overlays and per-step decision snapshots.
+They can contain personal information and should be treated as developer data.
 
-## Artefatos e logs
+## Known limitations
 
-Cada execução cria `runs/<uuid>/` com o frame original, overlay com centro/bbox e
-um JSON por passo. `tracing` registra decisão/confiança do Jev, instrução e
-resposta do Vocaela, grounding, latências (`frame_acquire_ms`, `png_encode_ms`,
-`base64_ms`, `vocaela_http_ms`, `vocaela_parse_ms`, `grounding_total_ms`), input
-e erros — nunca a chave de API.
+- The current VisionProvider grounds visible targets. It does not yet answer
+  arbitrary visual questions such as whether a dialog reports success. A
+  separate `VisionProvider::query(frame, question)` spike is needed before
+  conditional visual tasks are reliable.
+- A target that is off-screen or covered may return `NotFound`. The controller
+  records that result and does not click a fallback location.
+- The dock may be included in a captured monitor. This must be benchmarked with
+  a saved debug frame before introducing a hide/capture/restore guard.
+- The portal text backend currently uses supported keysyms. Clipboard-based
+  Unicode paste is isolated as the next input-backend step; arbitrary Unicode
+  text is not production-ready until that portal path is validated.
+- Vocaela is visual-only in this project. The referenced checkpoint is
+  CC BY-NC-SA; it is suitable for this prototype but must remain replaceable.
+- Voice, OCR, AT-SPI, DOM automation, EIS/libei, and browser-specific adapters
+  are intentionally outside this refactor.
 
-## Testes
+## Manual test guide
+
+1. Open Settings and save Jev credentials; test the connection.
+2. Optionally configure and test a text provider.
+3. Run dry mode and inspect a developer run.
+4. Authorize the portal once and confirm a PipeWire frame arrives.
+5. Test an OS-discovered application launch.
+6. Test a visible grounding action in dry mode, then with an explicit approval.
+7. Test `RequestText`, `AskUser`, `ReplyToUser`, `Scroll`, `PressKey`, `Wait`,
+   and cancellation independently.
+
+Run the offline checks with:
 
 ```bash
 cargo fmt --check
-cargo test
 cargo check
+cargo test
 ```
-
-Os testes unitários não usam rede, portal, PipeWire ou `llama-server`. O teste
-end-to-end live depende do desktop Wayland e das autorizações do portal.
-
-Os arquivos `main.py`, `jev.py`, `vocaela.py`, `wayland_portal.py` e demais
-scripts Python permanecem no repositório para comparação e regressão do MVP
-anterior.

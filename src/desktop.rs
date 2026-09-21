@@ -22,13 +22,17 @@ use ashpd::desktop::{
     },
     screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType},
 };
+use async_trait::async_trait;
 use enumflags2::BitFlags;
 use image::DynamicImage;
 use pipewire as pw;
 use pw::{properties::properties, spa};
 use thiserror::Error;
 
-use crate::vision::BoundingBox;
+use crate::{
+    action::{Key, ScrollDirection},
+    vision::BoundingBox,
+};
 
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -356,6 +360,13 @@ pub struct PortalSession {
     pub capture: PipewireCapture,
 }
 
+/// Text input is a boundary: it currently uses keysyms and can be replaced by
+/// Clipboard portal paste once that path is validated for arbitrary Unicode.
+#[async_trait]
+pub trait TextInputBackend {
+    async fn input_text(&self, text: &str) -> Result<(), DesktopError>;
+}
+
 impl PortalSession {
     pub async fn start() -> Result<Self, DesktopError> {
         let remote = Arc::new(RemoteDesktop::new().await?);
@@ -440,8 +451,38 @@ impl PortalSession {
         Ok(())
     }
 
-    pub async fn press_enter(&self) -> Result<(), DesktopError> {
-        self.key_sym(0xff0d).await
+    pub async fn press_key(&self, key: Key) -> Result<(), DesktopError> {
+        self.key_sym(keysym_for_key(&key)).await
+    }
+
+    pub async fn hotkey(&self, keys: &[Key]) -> Result<(), DesktopError> {
+        for key in keys {
+            self.key_state(keysym_for_key(key), KeyState::Pressed)
+                .await?;
+        }
+        for key in keys.iter().rev() {
+            self.key_state(keysym_for_key(key), KeyState::Released)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn scroll(&self, direction: ScrollDirection) -> Result<(), DesktopError> {
+        let (dx, dy) = match direction {
+            ScrollDirection::Up => (0.0, -1.0),
+            ScrollDirection::Down => (0.0, 1.0),
+            ScrollDirection::Left => (-1.0, 0.0),
+            ScrollDirection::Right => (1.0, 0.0),
+        };
+        self.remote
+            .notify_pointer_axis(
+                &self.session,
+                dx,
+                dy,
+                ashpd::desktop::remote_desktop::NotifyPointerAxisOptions::default(),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn type_text(&self, text: &str) -> Result<(), DesktopError> {
@@ -451,34 +492,56 @@ impl PortalSession {
             .collect::<Result<Vec<_>, _>>()?;
         for (keysym, shift) in symbols {
             if shift {
-                self.key_sym(0xffe1).await?;
+                self.key_state(0xffe1, KeyState::Pressed).await?;
             }
             self.key_sym(keysym).await?;
             if shift {
-                self.key_sym(0xffe1).await?;
+                self.key_state(0xffe1, KeyState::Released).await?;
             }
         }
         Ok(())
     }
 
     async fn key_sym(&self, keysym: i32) -> Result<(), DesktopError> {
+        self.key_state(keysym, KeyState::Pressed).await?;
+        self.key_state(keysym, KeyState::Released).await
+    }
+
+    async fn key_state(&self, keysym: i32, state: KeyState) -> Result<(), DesktopError> {
         self.remote
             .notify_keyboard_keysym(
                 &self.session,
                 keysym,
-                KeyState::Pressed,
+                state,
                 NotifyKeyboardKeysymOptions::default(),
             )
-            .await?;
-        self.remote
-            .notify_keyboard_keysym(
-                &self.session,
-                keysym,
-                KeyState::Released,
-                NotifyKeyboardKeysymOptions::default(),
-            )
-            .await?;
-        Ok(())
+            .await
+            .map_err(DesktopError::from)
+    }
+}
+
+#[async_trait]
+impl TextInputBackend for PortalSession {
+    async fn input_text(&self, text: &str) -> Result<(), DesktopError> {
+        self.type_text(text).await
+    }
+}
+
+fn keysym_for_key(key: &Key) -> i32 {
+    match key {
+        Key::Enter => 0xff0d,
+        Key::Escape => 0xff1b,
+        Key::Tab => 0xff09,
+        Key::Backspace => 0xff08,
+        Key::Space => 0x20,
+        Key::Up => 0xff52,
+        Key::Down => 0xff54,
+        Key::Left => 0xff51,
+        Key::Right => 0xff53,
+        Key::A => b'a' as i32,
+        Key::C => b'c' as i32,
+        Key::V => b'v' as i32,
+        Key::X => b'x' as i32,
     }
 }
 

@@ -5,7 +5,7 @@ export component AgentDock inherits Window {
     no-frame: true;
     background: transparent;
     preferred-width: 420px;
-    preferred-height: composer-open ? 160px : 56px;
+    preferred-height: composer-open ? 160px : confirmation-open ? 142px : 56px;
     min-width: 420px;
     max-width: 420px;
     min-height: 56px;
@@ -15,10 +15,16 @@ export component AgentDock inherits Window {
     in property <string> status-text: "Ready";
     in property <bool> working: false;
     in-out property <string> composer-text: "";
+    in-out property <bool> confirmation-open: false;
+    in-out property <string> confirmation-text: "";
     callback submit(string);
     callback close-composer();
     callback chat();
     callback voice();
+    callback settings();
+    callback allow-once();
+    callback cancel-confirmation();
+    callback cancel-task();
 
     Rectangle {
         background: transparent;
@@ -55,14 +61,23 @@ export component AgentDock inherits Window {
                     }
                 }
 
+                if confirmation-open: Rectangle {
+                    x: 8px; y: 4px; width: parent.width - 16px; height: 76px;
+                    background: #1f1f1f; border-radius: 10px;
+                    Text { x: 8px; y: 6px; width: parent.width - 16px; height: 34px; text: confirmation-text; color: white; wrap: word-wrap; }
+                    Button { x: 8px; y: 43px; width: 85px; height: 26px; text: "Cancel"; clicked => { cancel-confirmation(); } }
+                    Button { x: 100px; y: 43px; width: 100px; height: 26px; text: "Allow once"; clicked => { allow-once(); } }
+                }
+
                 HorizontalLayout {
-                    y: composer-open ? 120px : 0px;
+                    y: composer-open ? 120px : confirmation-open ? 82px : 0px;
                     height: 40px;
                     spacing: 12px;
                     Rectangle {
                         width: 36px; height: 36px; border-radius: 12px;
                         background: #292929;
                         Text { text: "V"; color: white; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                        TouchArea { clicked => { settings(); } }
                     }
                     VerticalLayout {
                         min-width: 0px;
@@ -79,10 +94,45 @@ export component AgentDock inherits Window {
                                 if (composer-open) { submit(composer-text); } else { chat(); }
                             }
                         }
+                        if working: Button { text: "Cancel"; clicked => { cancel-task(); } }
                     }
                 }
             }
         }
     }
 
+}
+
+export component SettingsWindow inherits Window {
+    title: "Vocs Settings";
+    preferred-width: 520px;
+    preferred-height: 500px;
+    in-out property <string> jev-base-url: "https://api.typesafe.ai";
+    in-out property <string> jev-model: "jev-latest";
+    in-out property <string> jev-api-key: "";
+    in-out property <string> text-base-url: "";
+    in-out property <string> text-model: "";
+    in-out property <string> text-api-key: "";
+    in-out property <string> status-text: "Not configured";
+    callback save();
+    callback test-jev();
+    callback test-text();
+    VerticalLayout {
+        padding: 20px; spacing: 8px;
+        Text { text: "Settings"; font-size: 22px; }
+        Text { text: "Decision Engine — TypeSafe Jev"; font-size: 16px; }
+        TextEdit { text <=> jev-base-url; placeholder-text: "Jev base URL"; }
+        TextEdit { text <=> jev-model; placeholder-text: "Jev model"; }
+        TextEdit { text <=> jev-api-key; placeholder-text: "API key (leave blank to keep saved key)"; }
+        Button { text: "Test Jev connection"; clicked => { test-jev(); } }
+        Text { text: "Text Provider — Custom OpenAI-compatible"; font-size: 16px; }
+        TextEdit { text <=> text-base-url; placeholder-text: "Base URL"; }
+        TextEdit { text <=> text-model; placeholder-text: "Model"; }
+        TextEdit { text <=> text-api-key; placeholder-text: "API key (optional; leave blank to keep saved key)"; }
+        Button { text: "Test text provider"; clicked => { test-text(); } }
+        HorizontalLayout {
+            Button { text: "Save"; clicked => { save(); } }
+            Text { text: status-text; color: #666; }
+        }
+    }
 }
