@@ -161,7 +161,13 @@ impl VisionProvider for VocaelaVisionProvider {
         {
             return Ok(GroundingResult::NotFound { raw_response });
         }
-        let bbox = parse_bbox(&raw_response)?;
+        let bbox = parse_bbox(&raw_response).map_err(|error| match error {
+            VisionError::InvalidBoundingBox(detail) => VisionError::InvalidBoundingBox(format!(
+                "{detail}; raw response: {:?}",
+                raw_response.chars().take(500).collect::<String>()
+            )),
+            error => error,
+        })?;
         Ok(GroundingResult::Found(FoundGrounding {
             bbox,
             raw_response,
@@ -177,7 +183,11 @@ impl VisionProvider for VocaelaVisionProvider {
 }
 
 pub fn parse_bbox(text: &str) -> Result<BoundingBox, VisionError> {
-    let regex = Regex::new(r"\[\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*\]").expect("literal bbox regex");
+    let number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)";
+    let regex = Regex::new(&format!(
+        r"\[\s*({number})\s*,\s*({number})\s*,\s*({number})\s*,\s*({number})\s*\]"
+    ))
+    .expect("literal bbox regex");
     let values = if let Some(captures) = regex.captures(text) {
         captures
             .iter()
@@ -185,6 +195,21 @@ pub fn parse_bbox(text: &str) -> Result<BoundingBox, VisionError> {
             .map(|capture| capture.unwrap().as_str().parse::<f64>())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| VisionError::InvalidBoundingBox("numbers are not decimals".into()))?
+    } else if let Some(captures) =
+        Regex::new(&format!(r"[\[(]\s*({number})\s*,\s*({number})\s*[\])]"))
+            .expect("literal coordinate regex")
+            .captures(text)
+    {
+        let x = captures[1]
+            .parse::<f64>()
+            .map_err(|_| VisionError::InvalidBoundingBox("point x is not a decimal".into()))?;
+        let y = captures[2]
+            .parse::<f64>()
+            .map_err(|_| VisionError::InvalidBoundingBox("point y is not a decimal".into()))?;
+        // A two-value response is an explicit center point. Normalize it to a
+        // small non-zero box so the common BoundingBox path remains uniform
+        // for debug and input conversion.
+        vec![x, y, 0.01, 0.01]
     } else {
         let json = text
             .trim()
@@ -249,6 +274,9 @@ fn find_json_coordinates(value: &serde_json::Value) -> Option<Vec<f64>> {
         serde_json::Value::Array(array) if array.len() >= 4 => {
             array[..4].iter().map(number).collect()
         }
+        serde_json::Value::Array(array) if array.len() >= 2 => {
+            Some(vec![number(&array[0])?, number(&array[1])?, 0.01, 0.01])
+        }
         serde_json::Value::Array(array) => array.iter().find_map(find_json_coordinates),
         _ => None,
     }
@@ -278,5 +306,11 @@ mod tests {
                 .center_y,
             0.75
         );
+    }
+    #[test]
+    fn parses_normalized_center_point() {
+        let bbox = parse_bbox("Normalized point: (0.25, 0.75)").unwrap();
+        assert_eq!((bbox.center_x, bbox.center_y), (0.25, 0.75));
+        assert_eq!((bbox.width, bbox.height), (0.01, 0.01));
     }
 }

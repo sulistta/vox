@@ -86,8 +86,8 @@ pub enum DesktopError {
     NoStream,
     #[error("no PipeWire frame is available yet")]
     NoFrame,
-    #[error("input character {0:?} is not supported by the MVP")]
-    UnsupportedCharacter(char),
+    #[error("clipboard paste backend is unavailable: {0}")]
+    Clipboard(String),
 }
 
 #[derive(Clone)]
@@ -358,6 +358,9 @@ pub struct PortalSession {
     remote: Arc<RemoteDesktop>,
     session: Arc<ashpd::desktop::Session<RemoteDesktop>>,
     pub capture: PipewireCapture,
+    // Keeping the owner alive is required on Wayland: the selection may be
+    // requested by the destination after `set_text` returns.
+    clipboard: Mutex<Option<arboard::Clipboard>>,
 }
 
 /// Text input is a boundary: it currently uses keysyms and can be replaced by
@@ -404,15 +407,30 @@ impl PortalSession {
             .open_pipe_wire_remote(&session, Default::default())
             .await?;
         let capture = PipewireCapture::start(node_id, logical_size, fd)?;
+        let clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => Some(clipboard),
+            Err(error) => {
+                tracing::warn!(%error, "clipboard paste backend is unavailable; TypeArtifact will be disabled");
+                None
+            }
+        };
         Ok(Self {
             remote,
             session: Arc::new(session),
             capture,
+            clipboard: Mutex::new(clipboard),
         })
     }
 
     pub fn capture_latest(&self) -> Result<Frame, DesktopError> {
         self.capture.capture_latest()
+    }
+
+    pub fn supports_text_input(&self) -> bool {
+        self.clipboard
+            .lock()
+            .map(|clipboard| clipboard.is_some())
+            .unwrap_or(false)
     }
 
     pub async fn close(&self) -> Result<(), DesktopError> {
@@ -485,23 +503,6 @@ impl PortalSession {
         Ok(())
     }
 
-    pub async fn type_text(&self, text: &str) -> Result<(), DesktopError> {
-        let symbols = text
-            .chars()
-            .map(keysym_for_char)
-            .collect::<Result<Vec<_>, _>>()?;
-        for (keysym, shift) in symbols {
-            if shift {
-                self.key_state(0xffe1, KeyState::Pressed).await?;
-            }
-            self.key_sym(keysym).await?;
-            if shift {
-                self.key_state(0xffe1, KeyState::Released).await?;
-            }
-        }
-        Ok(())
-    }
-
     async fn key_sym(&self, keysym: i32) -> Result<(), DesktopError> {
         self.key_state(keysym, KeyState::Pressed).await?;
         self.key_state(keysym, KeyState::Released).await
@@ -523,7 +524,19 @@ impl PortalSession {
 #[async_trait]
 impl TextInputBackend for PortalSession {
     async fn input_text(&self, text: &str) -> Result<(), DesktopError> {
-        self.type_text(text).await
+        {
+            let mut clipboard = self
+                .clipboard
+                .lock()
+                .map_err(|_| DesktopError::Clipboard("clipboard lock poisoned".into()))?;
+            let clipboard = clipboard
+                .as_mut()
+                .ok_or_else(|| DesktopError::Clipboard("not initialized".into()))?;
+            clipboard
+                .set_text(text)
+                .map_err(|error| DesktopError::Clipboard(error.to_string()))?;
+        }
+        self.hotkey(&[Key::Control, Key::V]).await
     }
 }
 
@@ -533,28 +546,16 @@ fn keysym_for_key(key: &Key) -> i32 {
         Key::Escape => 0xff1b,
         Key::Tab => 0xff09,
         Key::Backspace => 0xff08,
-        Key::Space => 0x20,
         Key::Up => 0xff52,
         Key::Down => 0xff54,
         Key::Left => 0xff51,
         Key::Right => 0xff53,
+        Key::Control => 0xffe3,
         Key::A => b'a' as i32,
         Key::C => b'c' as i32,
         Key::V => b'v' as i32,
         Key::X => b'x' as i32,
     }
-}
-
-fn keysym_for_char(ch: char) -> Result<(i32, bool), DesktopError> {
-    let (symbol, shift) = match ch {
-        'a'..='z' => (ch as i32, false),
-        'A'..='Z' => (ch.to_ascii_lowercase() as i32, true),
-        '0'..='9' | ' ' | '-' | '.' => (ch as i32, false),
-        '_' => ('-' as i32, true),
-        ':' => (';' as i32, true),
-        _ => return Err(DesktopError::UnsupportedCharacter(ch)),
-    };
-    Ok((symbol, shift))
 }
 
 #[cfg(test)]
@@ -579,11 +580,5 @@ mod tests {
         };
         assert_eq!(frame.normalized_to_pixel(bbox), (100, 50));
         assert_eq!(frame.normalized_to_logical(bbox), (50.0, 25.0));
-    }
-
-    #[test]
-    fn unsupported_text_is_rejected_before_input() {
-        assert!(keysym_for_char('é').is_err());
-        assert!(keysym_for_char('a').is_ok());
     }
 }

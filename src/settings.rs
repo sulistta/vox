@@ -16,6 +16,10 @@ pub struct TextProviderSettings {
     pub base_url: String,
     pub model: String,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub max_completion_tokens: Option<u32>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DebugSettings {
@@ -52,6 +56,8 @@ impl Settings {
                 model: settings.model.clone(),
                 api_key,
                 timeout: Duration::from_millis(settings.timeout_ms),
+                max_completion_tokens: settings.max_completion_tokens,
+                reasoning_effort: settings.reasoning_effort.clone(),
             })
     }
 }
@@ -109,6 +115,8 @@ mod tests {
             base_url: "http://text".into(),
             model: "model".into(),
             timeout_ms: 1000,
+            max_completion_tokens: None,
+            reasoning_effort: None,
         });
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap().text_provider.unwrap().model, "model");
@@ -116,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_confidence_policy_settings_use_new_probability_defaults() {
+    fn legacy_policy_settings_are_accepted_without_affecting_policy() {
         let path =
             std::env::temp_dir().join(format!("vocs-settings-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(
@@ -125,10 +133,7 @@ mod tests {
         )
         .unwrap();
         let settings = SettingsStore::at(path.clone()).load().unwrap();
-        assert_eq!(settings.policy.low_action_probability, 0.5);
-        assert_eq!(settings.policy.medium_action_probability, 0.4);
-        assert_eq!(settings.policy.high_action_probability, 0.6);
-        assert_eq!(settings.policy.min_action_margin, 0.04);
+        assert_eq!(settings.policy, PolicyConfig::default());
         let _ = std::fs::remove_file(path);
     }
 }

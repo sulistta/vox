@@ -5,26 +5,26 @@ export component AgentDock inherits Window {
     no-frame: true;
     background: transparent;
     preferred-width: 420px;
-    preferred-height: composer-open ? 160px : confirmation-open ? 142px : 56px;
+    preferred-height: confirmation-open ? 214px : (composer-open ? 160px : 56px);
     min-width: 420px;
     max-width: 420px;
     min-height: 56px;
-    max-height: 160px;
+    max-height: 214px;
 
     in property <bool> composer-open: false;
     in property <string> status-text: "Ready";
     in property <bool> working: false;
+    in property <bool> confirmation-open: false;
+    in property <string> confirmation-text: "";
     in-out property <string> composer-text: "";
-    in-out property <bool> confirmation-open: false;
-    in-out property <string> confirmation-text: "";
     callback submit(string);
     callback close-composer();
     callback chat();
     callback voice();
     callback settings();
-    callback allow-once();
-    callback cancel-confirmation();
     callback cancel-task();
+    callback allow-commit();
+    callback cancel-commit();
 
     Rectangle {
         background: transparent;
@@ -62,15 +62,21 @@ export component AgentDock inherits Window {
                 }
 
                 if confirmation-open: Rectangle {
-                    x: 8px; y: 4px; width: parent.width - 16px; height: 76px;
-                    background: #1f1f1f; border-radius: 10px;
-                    Text { x: 8px; y: 6px; width: parent.width - 16px; height: 34px; text: confirmation-text; color: white; wrap: word-wrap; }
-                    Button { x: 8px; y: 43px; width: 85px; height: 26px; text: "Cancel"; clicked => { cancel-confirmation(); } }
-                    Button { x: 100px; y: 43px; width: 100px; height: 26px; text: "Allow once"; clicked => { allow-once(); } }
+                    x: 8px; y: 8px; width: parent.width - 16px; height: 144px;
+                    background: #1a1a1a; border-radius: 10px;
+                    VerticalLayout {
+                        padding: 10px; spacing: 8px;
+                        Text { text: "Vox wants to commit:"; color: white; font-weight: 600; }
+                        Text { text: confirmation-text; color: #d4d4d4; wrap: word-wrap; }
+                        HorizontalLayout {
+                            Button { text: "Cancel"; clicked => { cancel-commit(); } }
+                            Button { text: "Allow once"; clicked => { allow-commit(); } }
+                        }
+                    }
                 }
 
                 HorizontalLayout {
-                    y: composer-open ? 120px : confirmation-open ? 82px : 0px;
+                    y: confirmation-open ? 160px : (composer-open ? 120px : 0px);
                     height: 40px;
                     spacing: 12px;
                     Rectangle {

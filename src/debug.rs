@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::{
     action::{ActionRecord, AgentState},
     desktop::Frame,
+    jev::DecisionCandidates,
     vision::BoundingBox,
 };
 
@@ -109,6 +110,7 @@ impl DebugWriter {
         selected_capability: &str,
         confidence: f64,
         probabilities: &std::collections::BTreeMap<String, f64>,
+        candidates: &DecisionCandidates,
     ) -> std::io::Result<()> {
         #[derive(Serialize)]
         struct Decision<'a> {
@@ -116,6 +118,7 @@ impl DebugWriter {
             selected_capability: &'a str,
             confidence: f64,
             probabilities: &'a std::collections::BTreeMap<String, f64>,
+            candidates: &'a DecisionCandidates,
             state: &'a AgentState,
         }
         let json = serde_json::to_vec_pretty(&Decision {
@@ -123,6 +126,7 @@ impl DebugWriter {
             selected_capability,
             confidence,
             probabilities,
+            candidates,
             state,
         })
         .map_err(std::io::Error::other)?;

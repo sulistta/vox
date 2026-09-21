@@ -18,9 +18,7 @@ mod ui {
 use anyhow::Result;
 use clap::Parser;
 use config::{Cli, Config};
-use controller::{
-    AgentEvent, ConfirmationRequest, EventSink, RunControl, run_gate, run_goal_cancelable,
-};
+use controller::{AgentEvent, EventSink, RunControl, run_gate, run_goal_cancelable};
 use jev::{DecisionProvider, JevClient, JevConfig};
 use secrets::{KeyringSecretStore, SecretStore};
 use settings::{SettingsStore, TextProviderSettings};
@@ -44,7 +42,6 @@ fn main() -> Result<()> {
     let dock = ui::AgentDock::new()?;
     dock.set_status_text("Ready".into());
     let gate = run_gate();
-    let pending_confirmation: Arc<Mutex<Option<ConfirmationRequest>>> = Arc::new(Mutex::new(None));
     let active_run: Arc<Mutex<Option<RunControl>>> = Arc::new(Mutex::new(None));
 
     let start_handle = handle.clone();
@@ -52,7 +49,6 @@ fn main() -> Result<()> {
         let dock_weak = dock.as_weak();
         let config = config.clone();
         let gate = gate.clone();
-        let pending_confirmation = pending_confirmation.clone();
         let active_run = active_run.clone();
         Arc::new(move |goal: String| {
             let Ok(permit) = gate.clone().try_acquire_owned() else {
@@ -61,7 +57,7 @@ fn main() -> Result<()> {
                 }
                 return;
             };
-            let sink = make_sink(dock_weak.clone(), pending_confirmation.clone());
+            let sink = make_sink(dock_weak.clone());
             let run_config = config.lock().unwrap().clone();
             let control = RunControl::default();
             *active_run.lock().unwrap() = Some(control.clone());
@@ -77,12 +73,19 @@ fn main() -> Result<()> {
     {
         let start = start.clone();
         let weak = dock.as_weak();
+        let active_run = active_run.clone();
         dock.on_submit(move |text: SharedString| {
             let goal = text.trim().to_string();
             if !goal.is_empty() {
                 if let Some(dock) = weak.upgrade() {
                     dock.set_composer_open(false);
                     dock.set_composer_text("".into());
+                }
+                if let Some(control) = active_run.lock().unwrap().as_ref() {
+                    if control.is_awaiting_user() {
+                        control.submit_user_reply(goal);
+                        return;
+                    }
                 }
                 start(goal);
             }
@@ -107,43 +110,32 @@ fn main() -> Result<()> {
     dock.on_voice(|| tracing::info!("Voice is not implemented in the MVP"));
     {
         let active_run = active_run.clone();
-        let pending = pending_confirmation.clone();
         dock.on_cancel_task(move || {
             if let Some(control) = active_run.lock().unwrap().as_ref() {
                 control.cancel();
             }
-            if let Some(request) = pending.lock().unwrap().take() {
-                request.respond(false);
+        });
+    }
+    {
+        let active_run = active_run.clone();
+        dock.on_allow_commit(move || {
+            if let Some(control) = active_run.lock().unwrap().as_ref() {
+                control.allow_commit();
             }
         });
     }
     {
-        let pending = pending_confirmation.clone();
-        let weak = dock.as_weak();
-        dock.on_allow_once(move || {
-            if let Some(request) = pending.lock().unwrap().take() {
-                request.respond(true);
-            }
-            if let Some(dock) = weak.upgrade() {
-                dock.set_confirmation_open(false);
-            }
-        });
-    }
-    {
-        let pending = pending_confirmation.clone();
-        let weak = dock.as_weak();
-        dock.on_cancel_confirmation(move || {
-            if let Some(request) = pending.lock().unwrap().take() {
-                request.respond(false);
-            }
-            if let Some(dock) = weak.upgrade() {
-                dock.set_confirmation_open(false);
+        let active_run = active_run.clone();
+        dock.on_cancel_commit(move || {
+            if let Some(control) = active_run.lock().unwrap().as_ref() {
+                control.cancel_commit();
             }
         });
     }
 
     {
         let config = config.clone();
+        let active_run = active_run.clone();
         let handle = handle.clone();
         dock.on_settings(move || {
             let window = match ui::SettingsWindow::new() {
@@ -153,7 +145,7 @@ fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(error) = configure_settings_window(&window, &config, &handle) {
+            if let Err(error) = configure_settings_window(&window, &config, &handle, &active_run) {
                 tracing::error!(%error, "could not configure settings window");
                 return;
             }
@@ -177,6 +169,7 @@ fn configure_settings_window(
     window: &ui::SettingsWindow,
     config: &Arc<Mutex<Config>>,
     handle: &tokio::runtime::Handle,
+    active_run: &Arc<Mutex<Option<RunControl>>>,
 ) -> Result<()> {
     {
         let current = config.lock().unwrap();
@@ -196,6 +189,7 @@ fn configure_settings_window(
     {
         let weak = window.as_weak();
         let config = config.clone();
+        let active_run = active_run.clone();
         window.on_save(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -210,6 +204,8 @@ fn configure_settings_window(
                     base_url,
                     model,
                     timeout_ms: 30_000,
+                    max_completion_tokens: None,
+                    reasoning_effort: None,
                 });
             let secrets = KeyringSecretStore;
             let jev_key = window.get_jev_api_key().trim().to_string();
@@ -228,11 +224,31 @@ fn configure_settings_window(
                 }
                 current.text_provider_api_key = Some(text_key);
             }
+            let resumed_text_provider = match current
+                .settings
+                .text_provider_config(current.text_provider_api_key.clone())
+            {
+                Some(provider_config) => match OpenAiCompatibleTextProvider::new(provider_config) {
+                    Ok(provider) => Some(Arc::new(provider) as Arc<dyn TextProvider>),
+                    Err(error) => {
+                        window.set_status_text(
+                            format!("Could not configure text provider: {error}").into(),
+                        );
+                        return;
+                    }
+                },
+                None => None,
+            };
             match store.save(&current.settings) {
                 Ok(()) => {
                     window.set_jev_api_key("".into());
                     window.set_text_api_key("".into());
                     window.set_status_text("Saved. API keys are in the system keyring.".into());
+                    if let Some(control) = active_run.lock().unwrap().as_ref()
+                        && control.is_awaiting_text_setup()
+                    {
+                        control.providers_updated(resumed_text_provider);
+                    }
                 }
                 Err(error) => {
                     window.set_status_text(format!("Could not save settings: {error}").into())
@@ -309,13 +325,9 @@ fn configure_settings_window(
     Ok(())
 }
 
-fn make_sink(
-    weak: slint::Weak<ui::AgentDock>,
-    pending_confirmation: Arc<Mutex<Option<ConfirmationRequest>>>,
-) -> EventSink {
+fn make_sink(weak: slint::Weak<ui::AgentDock>) -> EventSink {
     Arc::new(move |event| {
         let weak = weak.clone();
-        let pending_confirmation = pending_confirmation.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(dock) = weak.upgrade() {
                 match event {
@@ -331,18 +343,15 @@ fn make_sink(
                     }
                     AgentEvent::AwaitingUser { question } => {
                         dock.set_working(false);
+                        dock.set_composer_open(true);
                         dock.set_status_text(format!("Awaiting user: {question}").into());
                     }
-                    AgentEvent::AwaitingConfirmation(request) => {
+                    AgentEvent::AwaitingConfirmation { preview } => {
                         dock.set_working(false);
-                        let detail = request
-                            .preview
-                            .clone()
-                            .unwrap_or_else(|| request.action.clone());
-                        *pending_confirmation.lock().unwrap() = Some(request);
-                        dock.set_confirmation_text(detail.into());
+                        dock.set_composer_open(false);
+                        dock.set_confirmation_text(preview.into());
                         dock.set_confirmation_open(true);
-                        dock.set_status_text("Confirmation needed".into());
+                        dock.set_status_text("Awaiting confirmation".into());
                     }
                     AgentEvent::Reply(message) => {
                         dock.set_working(false);
@@ -352,8 +361,14 @@ fn make_sink(
                         dock.set_working(false);
                         dock.set_status_text(format!("Error: {message}").into());
                     }
-                    AgentEvent::Finished | AgentEvent::Cancelled => {
+                    AgentEvent::Finished => {
                         dock.set_working(false);
+                        dock.set_confirmation_open(false);
+                        dock.set_status_text("Completed — result not visually verified".into());
+                    }
+                    AgentEvent::Cancelled => {
+                        dock.set_working(false);
+                        dock.set_confirmation_open(false);
                         dock.set_status_text("Ready".into());
                     }
                 }
